@@ -428,7 +428,7 @@ export interface DeveloperRun {
   developerId: string
   mode: 'implement' | 'clarify'
   instructions: string
-  status: 'pending' | 'running' | 'success' | 'failure' | 'cancelled' | 'no_changes'
+  status: 'pending' | 'queued' | 'running' | 'success' | 'failure' | 'cancelled' | 'no_changes'
   gitShaStart: string | null
   gitShaEnd: string | null
   response: string | null
@@ -464,8 +464,14 @@ export const developersApi = {
     fetchAPI<Developer & {secret: string}>('/developers', {method: 'POST', body: JSON.stringify(data)}),
   delete: (id: string) => fetchAPI<void>(`/developers/${id}`, {method: 'DELETE'}),
   regenerateSecret: (id: string) => fetchAPI<{secret: string}>(`/developers/${id}/secret`, {method: 'POST'}),
-  dispatch: (id: string, instructions: string, mode: 'implement' | 'clarify' = 'implement') =>
-    fetchAPI<{runId: string}>(`/developers/${id}/dispatch`, {method: 'POST', body: JSON.stringify({instructions, mode})}),
+  dispatch: (id: string, instructions: string, mode: 'implement' | 'clarify' = 'implement', autoApprove = true) =>
+    fetchAPI<{runId: string; status: DeveloperRun['status']; queued: boolean; pending: boolean}>(`/developers/${id}/dispatch`, {method: 'POST', body: JSON.stringify({instructions, mode, autoApprove})}),
+  approveRun: (id: string, runId: string) =>
+    fetchAPI<DeveloperRun>(`/developers/${id}/runs/${runId}/approve`, {method: 'POST'}),
+  cancelRun: (id: string, runId: string) =>
+    fetchAPI<DeveloperRun>(`/developers/${id}/runs/${runId}/cancel`, {method: 'POST'}),
+  editRunInstructions: (id: string, runId: string, instructions: string) =>
+    fetchAPI<DeveloperRun>(`/developers/${id}/runs/${runId}`, {method: 'PATCH', body: JSON.stringify({instructions})}),
   listRuns: (id: string) => fetchAPI<DeveloperRun[]>(`/developers/${id}/runs`),
   getRun: (id: string, runId: string) => fetchAPI<DeveloperRun>(`/developers/${id}/runs/${runId}`),
   listLogs: (id: string, runId: string) => fetchAPI<DeveloperLog[]>(`/developers/${id}/runs/${runId}/logs`),

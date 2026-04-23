@@ -159,6 +159,7 @@ coordinatorRouter.post('/chats/:id/message', async (req, res, next) => {
       runId: string
       instructions: string
       queued: boolean
+      pending: boolean
     }[] = []
 
     const fullText = await run(message, history, (event) => {
@@ -172,6 +173,7 @@ coordinatorRouter.post('/chats/:id/message', async (req, res, next) => {
           runId: event.runId,
           instructions: event.instructions,
           queued: event.queued,
+          pending: event.pending,
         })
       }
       sendSSE(res, event)

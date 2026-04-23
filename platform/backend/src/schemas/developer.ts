@@ -4,6 +4,7 @@ export const developerStatusSchema = z.enum(['offline', 'idle', 'busy', 'error']
 export const runModeSchema = z.enum(['implement', 'clarify'])
 export const runStatusSchema = z.enum([
   'pending',
+  'queued',
   'running',
   'success',
   'failure',
@@ -82,6 +83,14 @@ export const developerLogSchema = z.object({
 export const dispatchSchema = z.object({
   instructions: z.string().min(1),
   mode: runModeSchema.optional(),
+  // When true, skip the 'pending' approval gate and queue for execution
+  // immediately. Defaults to true (direct HTTP dispatches are explicit user
+  // actions). Coordinator-driven dispatches pass false to require approval.
+  autoApprove: z.boolean().optional(),
+})
+
+export const editRunInstructionsSchema = z.object({
+  instructions: z.string().min(1),
 })
 
 export type Developer = z.infer<typeof developerSchema>
@@ -93,3 +102,4 @@ export type DeveloperLog = z.infer<typeof developerLogSchema>
 export type RunMode = z.infer<typeof runModeSchema>
 export type RunStatus = z.infer<typeof runStatusSchema>
 export type Dispatch = z.infer<typeof dispatchSchema>
+export type EditRunInstructions = z.infer<typeof editRunInstructionsSchema>

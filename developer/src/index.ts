@@ -100,6 +100,21 @@ function buildImplementPrompt(instructions: string): string {
 - Match existing code style. Read similar files before writing new ones.
 - Don't add features beyond what's asked. Don't write tests unless asked. Don't refactor surrounding code unless asked.
 
+## Required dispatch structure
+A well-formed dispatch from the coordinator MUST contain these four labeled sections:
+
+1. **STOP criteria** — when to halt and report instead of guessing.
+2. **Out of scope** — what NOT to touch.
+3. **Commit/report contract** — expected commit messages, push-or-not, final-report contents.
+4. **Read-before-write requirements** — files/components/schemas to bulk-read before any write.
+
+Before doing anything else, scan the Task below for these four sections. If any are missing, contradictory, or obviously wrong for the task:
+- Do NOT proceed with implementation.
+- Do a minimal read of the code to confirm the ambiguity is real (not just unfamiliar naming).
+- Finish by reporting: "MISSING/AMBIGUOUS DISPATCH SECTIONS" plus a bulleted list of what's missing and the specific questions you need answered. The coordinator will re-dispatch in clarify mode.
+
+If all four sections are present and coherent, proceed. Respect the STOP criteria mid-run — if you hit one during execution, halt and report rather than guessing.
+
 ## Task
 ${instructions}
 
@@ -114,6 +129,9 @@ function buildClarifyPrompt(instructions: string): string {
 3. Return specific questions that need answers before implementation can proceed
 
 USE BULK READS — read multiple related files in parallel. Understand the code before asking.
+
+## Required dispatch structure
+A well-formed dispatch should contain four labeled sections: STOP criteria, Out of scope, Commit/report contract, Read-before-write requirements. In clarify mode, if any of these are missing, flag that explicitly in your questions — the coordinator needs to add them before you can implement.
 
 ## Task (do not implement, only clarify)
 ${instructions}

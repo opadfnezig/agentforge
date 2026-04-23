@@ -4,6 +4,7 @@ import {
   createDeveloperSchema,
   updateDeveloperSchema,
   dispatchSchema,
+  editRunInstructionsSchema,
 } from '../schemas/developer.js'
 import * as developerQueries from '../db/queries/developers.js'
 import { developerRegistry } from '../services/developer-registry.js'
@@ -159,23 +160,28 @@ developersRouter.get('/:id/secret', async (req, res, next) => {
 })
 
 // Dispatch a run (fire-and-forget; returns runId immediately).
-// If the developer is offline or busy the run is persisted as 'pending' and
-// assigned when the developer becomes idle — the request always succeeds.
+// Direct HTTP dispatches default to autoApprove=true and insert as 'queued'
+// (immediately dispatched if the developer is idle, otherwise drained when
+// they become idle). Callers that want the approval gate (coordinator) pass
+// autoApprove=false, inserting as 'pending' — the run will sit awaiting
+// user action from the coordinator chat badge.
 developersRouter.post('/:id/dispatch', async (req, res, next) => {
   try {
-    const { instructions, mode } = dispatchSchema.parse(req.body)
+    const { instructions, mode, autoApprove } = dispatchSchema.parse(req.body)
     const developer = await developerQueries.getDeveloper(req.params.id)
     if (!developer) {
       throw new AppError(404, 'Developer not found', 'DEVELOPER_NOT_FOUND')
     }
 
     const finalMode = mode || 'implement'
-    const run = await developerQueries.createRun(developer.id, instructions, finalMode)
+    const shouldApprove = autoApprove !== false
+    const initialStatus = shouldApprove ? 'queued' : 'pending'
+    const run = await developerQueries.createRun(developer.id, instructions, finalMode, initialStatus)
 
     const online = developerRegistry.isOnline(developer.id)
     const idle = online && developer.status === 'idle'
 
-    if (idle) {
+    if (shouldApprove && idle) {
       // Immediate dispatch; resolution handled via registry events
       developerRegistry
         .dispatch(developer.id, run.id, instructions, finalMode)
@@ -189,26 +195,102 @@ developersRouter.post('/:id/dispatch', async (req, res, next) => {
         })
     } else {
       logger.info(
-        { developerId: developer.id, runId: run.id, online, status: developer.status },
-        'Dispatch queued (developer not idle)'
+        { developerId: developer.id, runId: run.id, online, status: developer.status, pending: !shouldApprove },
+        shouldApprove ? 'Dispatch queued (developer not idle)' : 'Dispatch awaiting approval'
       )
     }
 
-    res.status(202).json({ runId: run.id, status: run.status, mode: run.mode, queued: !idle })
+    res.status(202).json({
+      runId: run.id,
+      status: run.status,
+      mode: run.mode,
+      queued: shouldApprove && !idle,
+      pending: !shouldApprove,
+    })
   } catch (error) {
     next(error)
   }
 })
 
-// List pending (queued) runs for a developer — queue inspection.
+// List queued (approved, waiting) runs for a developer.
 developersRouter.get('/:id/queue', async (req, res, next) => {
   try {
     const developer = await developerQueries.getDeveloper(req.params.id)
     if (!developer) {
       throw new AppError(404, 'Developer not found', 'DEVELOPER_NOT_FOUND')
     }
-    const pending = await developerQueries.listPendingRuns(developer.id)
-    res.json(pending)
+    const queued = await developerQueries.listQueuedRuns(developer.id)
+    res.json(queued)
+  } catch (error) {
+    next(error)
+  }
+})
+
+// Approve a pending run — flips pending → queued and tries to drain the
+// queue immediately if the developer is idle.
+developersRouter.post('/:id/runs/:runId/approve', async (req, res, next) => {
+  try {
+    const run = await developerQueries.getRun(req.params.runId)
+    if (!run || run.developerId !== req.params.id) {
+      throw new AppError(404, 'Run not found', 'RUN_NOT_FOUND')
+    }
+    if (run.status !== 'pending') {
+      throw new AppError(409, `Run is ${run.status}, cannot approve`, 'RUN_NOT_PENDING')
+    }
+    const updated = await developerQueries.updateRun(run.id, { status: 'queued' })
+    if (updated) developerRegistry.events.emit(`update:${run.id}`, updated)
+    logger.info({ developerId: req.params.id, runId: run.id }, 'Run approved')
+    developerRegistry.assignNextQueued(req.params.id).catch((err) => {
+      logger.error({ err, developerId: req.params.id }, 'Queue drain after approve failed')
+    })
+    res.json(updated)
+  } catch (error) {
+    next(error)
+  }
+})
+
+// Cancel a pending or queued run — flips status → cancelled. Running runs
+// are left alone; use the worker-side cancellation path for those.
+developersRouter.post('/:id/runs/:runId/cancel', async (req, res, next) => {
+  try {
+    const run = await developerQueries.getRun(req.params.runId)
+    if (!run || run.developerId !== req.params.id) {
+      throw new AppError(404, 'Run not found', 'RUN_NOT_FOUND')
+    }
+    if (run.status !== 'pending' && run.status !== 'queued') {
+      throw new AppError(409, `Run is ${run.status}, cannot cancel`, 'RUN_NOT_CANCELLABLE')
+    }
+    const updated = await developerQueries.updateRun(run.id, {
+      status: 'cancelled',
+      finishedAt: new Date(),
+    })
+    if (updated) {
+      developerRegistry.events.emit(`update:${run.id}`, updated)
+      developerRegistry.events.emit(`complete:${run.id}`, updated)
+    }
+    logger.info({ developerId: req.params.id, runId: run.id }, 'Run cancelled')
+    res.json(updated)
+  } catch (error) {
+    next(error)
+  }
+})
+
+// Edit a pending run's instructions (pre-approval tweak). Only allowed while
+// status === 'pending' — once queued or running, instructions are immutable.
+developersRouter.patch('/:id/runs/:runId', async (req, res, next) => {
+  try {
+    const { instructions } = editRunInstructionsSchema.parse(req.body)
+    const run = await developerQueries.getRun(req.params.runId)
+    if (!run || run.developerId !== req.params.id) {
+      throw new AppError(404, 'Run not found', 'RUN_NOT_FOUND')
+    }
+    if (run.status !== 'pending') {
+      throw new AppError(409, `Run is ${run.status}, instructions are immutable`, 'RUN_NOT_EDITABLE')
+    }
+    const updated = await developerQueries.updateRunInstructions(run.id, instructions)
+    if (updated) developerRegistry.events.emit(`update:${run.id}`, updated)
+    logger.info({ developerId: req.params.id, runId: run.id }, 'Run instructions edited')
+    res.json(updated)
   } catch (error) {
     next(error)
   }

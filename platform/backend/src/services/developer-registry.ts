@@ -64,7 +64,7 @@ class DeveloperRegistry {
 
   /**
    * Register a connected developer. Updates DB status to 'idle' and stores the socket.
-   * Also drains any queued (pending) runs for this developer.
+   * Also drains any approved (queued) runs for this developer.
    */
   async register(developerId: string, ws: DevWebSocket): Promise<void> {
     const existing = this.sockets.get(developerId)
@@ -78,24 +78,25 @@ class DeveloperRegistry {
     })
     logger.info({ developerId }, 'Developer registered')
 
-    // Drain any runs that were queued while the developer was offline.
-    this.assignNextPending(developerId).catch((err) => {
+    // Drain any runs that were approved while the developer was offline.
+    this.assignNextQueued(developerId).catch((err) => {
       logger.error({ err, developerId }, 'Queue drain on register failed')
     })
   }
 
   /**
-   * Try to dispatch the next pending (queued) run for a developer, if any.
-   * Called on register and after each run completes. No-op if none queued
-   * or the developer is not currently idle/online.
+   * Try to dispatch the next approved (queued) run for a developer, if any.
+   * Called on register, after each run completes, and when the user approves
+   * a pending run. No-op if nothing queued or the developer is not currently
+   * idle/online. Runs in 'pending' (awaiting approval) are never picked.
    */
-  async assignNextPending(developerId: string): Promise<void> {
+  async assignNextQueued(developerId: string): Promise<void> {
     const ws = this.sockets.get(developerId)
     if (!ws || ws.readyState !== 1) return
     const dev = await developerQueries.getDeveloper(developerId)
     if (!dev || dev.status !== 'idle') return
 
-    const next = await developerQueries.getNextPendingRun(developerId)
+    const next = await developerQueries.getNextQueuedRun(developerId)
     if (!next) return
 
     logger.info({ developerId, runId: next.id }, 'Assigning queued run')
@@ -275,7 +276,7 @@ class DeveloperRegistry {
               await developerQueries.updateDeveloper(developerId, { status: 'idle' })
               this.events.emit(`complete:${msg.runId}`, updated)
               // Drain next queued run if any
-              this.assignNextPending(developerId).catch((err) => {
+              this.assignNextQueued(developerId).catch((err) => {
                 logger.error({ err, developerId }, 'Queue drain after complete failed')
               })
             }

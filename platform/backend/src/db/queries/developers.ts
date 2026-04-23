@@ -150,7 +150,8 @@ export const deleteDeveloper = async (id: string): Promise<boolean> => {
 export const createRun = async (
   developerId: string,
   instructions: string,
-  mode: RunMode = 'implement'
+  mode: RunMode = 'implement',
+  initialStatus: RunStatus = 'queued'
 ): Promise<DeveloperRun> => {
   const [row] = await db<DbDeveloperRun>('developer_runs')
     .insert({
@@ -158,10 +159,21 @@ export const createRun = async (
       developer_id: developerId,
       mode,
       instructions,
-      status: 'pending',
+      status: initialStatus,
     })
     .returning('*')
   return toRun(row)
+}
+
+export const updateRunInstructions = async (
+  id: string,
+  instructions: string
+): Promise<DeveloperRun | null> => {
+  const [row] = await db<DbDeveloperRun>('developer_runs')
+    .where({ id })
+    .update({ instructions, updated_at: new Date() })
+    .returning('*')
+  return row ? toRun(row) : null
 }
 
 export const getRun = async (id: string): Promise<DeveloperRun | null> => {
@@ -225,21 +237,24 @@ export const updateRun = async (id: string, data: UpdateRunInput): Promise<Devel
   return row ? toRun(row) : null
 }
 
-// Pick the oldest pending run for a developer (FIFO queue).
-export const getNextPendingRun = async (
+// Pick the oldest approved (queued) run for a developer (FIFO queue).
+// Runs in 'pending' (awaiting approval) are intentionally skipped.
+export const getNextQueuedRun = async (
   developerId: string
 ): Promise<DeveloperRun | null> => {
   const row = await db<DbDeveloperRun>('developer_runs')
-    .where({ developer_id: developerId, status: 'pending' })
+    .where({ developer_id: developerId, status: 'queued' })
     .orderBy('created_at', 'asc')
     .first()
   return row ? toRun(row) : null
 }
 
-// List all pending runs for a developer (queue inspection).
-export const listPendingRuns = async (developerId: string): Promise<DeveloperRun[]> => {
+// List queued runs for a developer (queue inspection). Does NOT include
+// runs awaiting approval ('pending') — those are user-visible via the
+// dispatch badge instead.
+export const listQueuedRuns = async (developerId: string): Promise<DeveloperRun[]> => {
   const rows = await db<DbDeveloperRun>('developer_runs')
-    .where({ developer_id: developerId, status: 'pending' })
+    .where({ developer_id: developerId, status: 'queued' })
     .orderBy('created_at', 'asc')
   return rows.map(toRun)
 }

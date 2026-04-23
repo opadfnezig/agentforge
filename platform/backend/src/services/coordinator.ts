@@ -25,7 +25,11 @@ export type CoordinatorEvent =
       mode: RunMode
       runId: string
       instructions: string
+      // All coordinator-initiated dispatches start in 'pending' (awaiting
+      // approval). Kept as a bool flag for UI backward-compat with stored
+      // chat history; new consumers should check the run's real status.
       queued: boolean
+      pending: boolean
     }
   | { type: 'text'; text: string }
   | { type: 'done' }
@@ -125,9 +129,34 @@ Modes:
 - implement: developer will make changes, commit and push if git repo (use for actual work)
 - clarify: developer reads the code and asks clarifying questions, never commits (use when instructions would be ambiguous)
 
-Rules:
+## Required dispatch structure
+
+Every dispatch you emit MUST contain these four labeled sections. The developer will refuse the dispatch (or proceed blindly) if any are missing or contradictory. Write them confidently — the user reviews and approves the dispatch before it executes, so being precise is more valuable than being tentative.
+
+1. **STOP criteria** — exit condition if data is missing/ambiguous. Tell the developer when to halt and re-dispatch in clarify mode instead of guessing.
+2. **Out of scope** — negative space. What the developer MUST NOT touch (themes, layouts, unrelated modules, schema rewrites, etc.).
+3. **Commit/report contract** — exact commit messages expected (if any), whether to push, and what the final report back to you must contain.
+4. **Read-before-write requirements** — which files/components/schemas must be read (bulk) before any write.
+
+Use the exact labels above as markdown headers inside the dispatch body. Put the rest of the instructions (task description, acceptance criteria) above them or in another clearly-labeled section.
+
+## Reliability: split large tasks
+
+Prefer many small, dependency-ordered dispatches over one big bundle. Smaller scope = higher reliability. If a single request would cover 5+ unrelated areas, break it into 2–4 dispatches, each with its own four required sections.
+
+## Execution ordering is the dispatch order
+
+Developers process dispatches FIFO per developer — the order you emit the [dispatch, ...][end] blocks IS the order they will run. Order with dependency awareness:
+- resume-prior-push / cleanup / migrations FIRST
+- schema/type/contract changes BEFORE code that consumes them
+- tests/docs AFTER the code they cover
+
+Do NOT retroactively split dispatches that are already queued — this rule is forward-looking.
+
+## Rules
 - You can query multiple oracles and dispatch to developers in the same turn. Output ALL commands you need, then stop. Do NOT write any prose before or after the commands — let the synthesis pass produce the user-facing response.
 - CRITICAL: If you intend to dispatch, you MUST use the [dispatch, ...][end] syntax. Describing a dispatch in prose ("I will dispatch X to do Y") does NOT actually dispatch anything. The command syntax is the only way to trigger real work.
+- Dispatches are PROVISIONAL. They land in a 'pending' state and wait for the user to approve, cancel, or edit them via the chat badge. Do NOT ask the user "do you approve?" in prose — the badge buttons are the approval surface. Write instructions confidently as if they will run.
 - Dispatches are fire-and-report — they return a runId the user can track. Don't wait for completion in your response.
 - Prefer 'clarify' mode when the request is high-level or ambiguous. Prefer 'implement' when the user has been specific or confirmed the approach.
 - If the question is purely conversational AND needs no oracle data or dispatch, respond directly in plain prose (no fake command formatting).
@@ -162,7 +191,9 @@ const buildSecondPassPrompt = (
   let prompt = `You are a coordinator. You just queried oracles and/or dispatched developers — results are below. Synthesize a response for the user.
 
 - Answer the user's question directly, using oracle data as source of truth.
-- If you dispatched, tell the user clearly: which developer, mode, runId, and where to watch progress (/developers/<id>).
+- If you dispatched, tell the user briefly: which developer, mode, and that the dispatch is awaiting their approval in the chat badge. Dispatches do NOT execute until the user approves — treat them as provisional.
+- Do NOT repeat the full dispatch instructions in your user message. The user can expand the dispatch badge to see them (and can edit them before approving).
+- When you dispatched, ALWAYS include a "## Decisions I Made" section in your user-facing message. List the assumptions you made and ambiguities you resolved on the user's behalf (e.g. "picked implement over clarify because X", "scoped to module Y, skipped Z", "chose name/path W because V"). This is the user's chance to catch you before they approve the dispatch.
 - Be dense. No filler, no meta-commentary about oracles or your process.
 - You have live oracle/developer access every turn — never say otherwise.`
 
@@ -178,7 +209,7 @@ const buildSecondPassPrompt = (
     if (d.error) {
       prompt += `\n\n--- DISPATCH FAILED: ${d.developer} ---\nError: ${d.error}\nInstructions attempted: ${d.instructions}\n--- END DISPATCH ---`
     } else {
-      prompt += `\n\n--- DISPATCHED: ${d.developer} (mode: ${d.mode}, runId: ${d.runId}) ---\nInstructions: ${d.instructions}\n--- END DISPATCH ---`
+      prompt += `\n\n--- DISPATCHED (pending approval): ${d.developer} (mode: ${d.mode}, runId: ${d.runId}) ---\nInstructions: ${d.instructions}\n--- END DISPATCH ---`
     }
   }
 
@@ -392,18 +423,11 @@ export const run = async (
           return { developer: d.developer, mode: d.mode, runId: null, instructions: d.instructions, error: `Developer "${d.developer}" not found` }
         }
         try {
-          // Create the run. Queue it if developer isn't idle/online — the registry
-          // will drain pending runs when the developer reconnects or finishes.
-          const run = await developerQueries.createRun(dev.id, d.instructions, d.mode)
-          const online = developerRegistry.isOnline(dev.id)
-          const idle = online && dev.status === 'idle'
-          if (idle) {
-            developerRegistry.dispatch(dev.id, run.id, d.instructions, d.mode).catch((err) => {
-              logger.error({ err, runId: run.id }, 'Dispatch failed async')
-            })
-          } else {
-            logger.info({ runId: run.id, developer: d.developer, online, status: dev.status }, 'Dispatch queued')
-          }
+          // Coordinator-initiated dispatches land in 'pending' and wait for
+          // the user to approve or cancel them from the chat badge. We do
+          // NOT call developerRegistry.dispatch here — approval drives that.
+          const run = await developerQueries.createRun(dev.id, d.instructions, d.mode, 'pending')
+          logger.info({ runId: run.id, developer: d.developer }, 'Dispatch pending approval')
           emit({
             type: 'dispatch',
             developer: d.developer,
@@ -411,7 +435,8 @@ export const run = async (
             mode: d.mode,
             runId: run.id,
             instructions: d.instructions,
-            queued: !idle,
+            queued: false,
+            pending: true,
           })
           return { developer: d.developer, mode: d.mode, runId: run.id, instructions: d.instructions, error: null }
         } catch (err) {

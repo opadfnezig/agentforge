@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, memo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Button } from '@/components/ui/button'
@@ -26,6 +26,7 @@ interface DispatchInfo {
   runId: string
   instructions: string
   queued: boolean
+  pending?: boolean
 }
 
 interface Message {
@@ -187,25 +188,39 @@ export default function CoordinatorPage() {
       const decoder = new TextDecoder()
       let buffer = ''
       let accText = ''
-      const accOracles: OracleResponse[] = []
-      const accDispatches: DispatchInfo[] = []
+      let accOracles: OracleResponse[] = []
+      let accDispatches: DispatchInfo[] = []
       let currentStatus = ''
 
-      const updateAssistant = () => {
+      // Coalesce bursts of stream chunks into a single setState per frame.
+      // Without this, each text token triggers a full messages re-render;
+      // react-markdown re-parses the growing body on every chunk which
+      // pegs the main thread during long completions.
+      let pendingFrame: number | null = null
+      const flush = () => {
+        pendingFrame = null
         setMessages(prev => {
-          const updated = [...prev]
+          const updated = prev.slice()
           const idx = assistantIdx.current
           if (idx >= 0 && idx < updated.length) {
             updated[idx] = {
               role: 'assistant',
               content: accText,
-              oracles: [...accOracles],
-              dispatches: [...accDispatches],
+              oracles: accOracles,
+              dispatches: accDispatches,
               status: currentStatus,
             }
           }
           return updated
         })
+      }
+      const schedule = () => {
+        if (pendingFrame !== null) return
+        if (typeof requestAnimationFrame === 'function') {
+          pendingFrame = requestAnimationFrame(flush)
+        } else {
+          pendingFrame = window.setTimeout(flush, 16) as unknown as number
+        }
       }
 
       while (true) {
@@ -223,44 +238,56 @@ export default function CoordinatorPage() {
             if (event.type === 'status') {
               currentStatus = event.message
               setStatusText(event.message)
-              updateAssistant()
+              schedule()
             } else if (event.type === 'oracle') {
-              accOracles.push({
+              // New array reference only when an entry is actually added —
+              // lets memoized children skip when unrelated fields update.
+              accOracles = [...accOracles, {
                 domain: event.domain,
                 question: event.question,
                 response: event.response,
-              })
+              }]
               currentStatus = `Got response from ${event.domain}`
-              updateAssistant()
+              schedule()
             } else if (event.type === 'dispatch') {
-              accDispatches.push({
+              accDispatches = [...accDispatches, {
                 developer: event.developer,
                 developerId: event.developerId,
                 mode: event.mode,
                 runId: event.runId,
                 instructions: event.instructions,
                 queued: !!event.queued,
-              })
-              currentStatus = event.queued
+                pending: !!event.pending,
+              }]
+              currentStatus = event.pending
+                ? `Awaiting approval: ${event.developer}`
+                : event.queued
                 ? `Queued for ${event.developer}`
                 : `Dispatched to ${event.developer}`
-              updateAssistant()
+              schedule()
             } else if (event.type === 'text') {
               accText += event.text
               currentStatus = ''
-              updateAssistant()
+              schedule()
             } else if (event.type === 'done') {
               currentStatus = ''
-              updateAssistant()
+              schedule()
             }
           } catch {
             // skip malformed
           }
         }
       }
+      // Ensure the terminal state actually lands even if no events arrived
+      // after the last scheduled frame.
+      if (pendingFrame !== null) {
+        if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(pendingFrame)
+        else clearTimeout(pendingFrame)
+      }
+      flush()
     } catch (err) {
       setMessages(prev => {
-        const updated = [...prev]
+        const updated = prev.slice()
         const idx = assistantIdx.current
         if (idx >= 0 && idx < updated.length) {
           updated[idx] = {
@@ -349,94 +376,13 @@ Bonfire architecture now uses 4 stages
           <>
             <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
               {messages.map((msg, i) => (
-                <div key={msg.id || i} className={`group relative max-w-2xl ${msg.role === 'user' ? 'ml-auto' : 'mr-auto'}`}>
-                  <div className="flex items-center gap-2 mb-1">
-                    <div className="text-xs text-zinc-500">
-                      {msg.role === 'user' ? 'You' : msg.role === 'system' ? 'System' : 'Coordinator'}
-                    </div>
-                    {msg.id && !loading && (
-                      <button
-                        onClick={() => {
-                          if (confirm('Delete this message and everything after it?')) {
-                            rewindFromMessage(msg.id!)
-                          }
-                        }}
-                        className="opacity-0 group-hover:opacity-100 text-[10px] text-zinc-600 hover:text-red-400 transition-opacity"
-                        title="Delete this and all following messages"
-                      >
-                        rewind from here
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Status spinner */}
-                  {msg.role === 'assistant' && msg.status && !msg.content && (
-                    <div className="flex items-center gap-2 text-xs text-zinc-500 mb-2 px-4 py-2 bg-zinc-900/50 rounded border border-zinc-800">
-                      <span className="animate-spin inline-block w-3 h-3 border border-zinc-500 border-t-transparent rounded-full" />
-                      {msg.status}
-                    </div>
-                  )}
-
-                  {/* Oracle responses (collapsible) — shows outgoing query + incoming response */}
-                  {msg.oracles && msg.oracles.length > 0 && (
-                    <div className="mb-2 space-y-1">
-                      {msg.oracles.map((oracle, j) => (
-                        <details key={j} className="bg-zinc-900 border border-zinc-800 rounded text-xs">
-                          <summary className="px-3 py-1.5 cursor-pointer text-zinc-400 hover:text-zinc-200">
-                            Oracle: <span className="font-medium text-amber-400">{oracle.domain}</span>
-                            <span className="text-zinc-600 ml-2">Q: {oracle.question.slice(0, 60)}{oracle.question.length > 60 ? '...' : ''}</span>
-                          </summary>
-                          <div className="border-t border-zinc-800 divide-y divide-zinc-800 max-h-96 overflow-y-auto">
-                            <div className="px-3 py-2">
-                              <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Query sent</div>
-                              <div className="text-zinc-300 prose prose-sm prose-invert max-w-none prose-p:my-1 prose-pre:bg-zinc-800 prose-code:text-emerald-400">
-                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{oracle.question}</ReactMarkdown>
-                              </div>
-                            </div>
-                            <div className="px-3 py-2">
-                              <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Response</div>
-                              <div className="text-zinc-300 prose prose-sm prose-invert max-w-none prose-p:my-1 prose-pre:bg-zinc-800 prose-code:text-emerald-400">
-                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{oracle.response}</ReactMarkdown>
-                              </div>
-                            </div>
-                          </div>
-                        </details>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Dispatch badges (collapsible, live-tracked) */}
-                  {msg.dispatches && msg.dispatches.length > 0 && (
-                    <div className="mb-2 space-y-1">
-                      {msg.dispatches.map((d) => (
-                        <DispatchBadge key={d.runId} dispatch={d} />
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Message content */}
-                  <div
-                    className={`rounded-lg px-4 py-3 text-sm ${
-                      msg.role === 'user'
-                        ? 'bg-zinc-800 text-zinc-100 whitespace-pre-wrap'
-                        : msg.role === 'system'
-                        ? 'bg-emerald-950 border border-emerald-800 text-emerald-300 font-mono whitespace-pre-wrap'
-                        : 'bg-zinc-900 border border-zinc-800 text-zinc-300 prose prose-sm prose-invert max-w-none prose-p:my-2 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-li:my-0 prose-pre:bg-zinc-800 prose-pre:border prose-pre:border-zinc-700 prose-code:text-emerald-400 prose-strong:text-zinc-100'
-                    }`}
-                  >
-                    {msg.role === 'assistant' && msg.content ? (
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {stripSentinel(msg.content)}
-                      </ReactMarkdown>
-                    ) : msg.role === 'assistant' && !msg.content && !msg.status ? (
-                      loading && i === messages.length - 1 ? (
-                        <span className="text-zinc-600">Querying oracles...</span>
-                      ) : null
-                    ) : (
-                      msg.content || null
-                    )}
-                  </div>
-                </div>
+                <MessageRow
+                  key={msg.id || i}
+                  message={msg}
+                  isLast={i === messages.length - 1}
+                  loading={loading}
+                  onRewind={rewindFromMessage}
+                />
               ))}
             </div>
 
@@ -461,11 +407,139 @@ Bonfire architecture now uses 4 stages
   )
 }
 
+// ---------------------------------------------------------------------------
+// Message row
+//
+// Memoized so that when one message mutates (e.g. a streaming assistant), the
+// other messages in the list don't re-render. Relies on stable object
+// references in the `messages` state — `handleChat` only replaces the single
+// streaming row and leaves prior rows' references untouched.
+// ---------------------------------------------------------------------------
+
+interface MessageRowProps {
+  message: Message
+  isLast: boolean
+  loading: boolean
+  onRewind: (id: string) => void
+}
+
+const MessageRow = memo(function MessageRow({ message: msg, isLast, loading, onRewind }: MessageRowProps) {
+  return (
+    <div className={`group relative max-w-2xl ${msg.role === 'user' ? 'ml-auto' : 'mr-auto'}`}>
+      <div className="flex items-center gap-2 mb-1">
+        <div className="text-xs text-zinc-500">
+          {msg.role === 'user' ? 'You' : msg.role === 'system' ? 'System' : 'Coordinator'}
+        </div>
+        {msg.id && !loading && (
+          <button
+            onClick={() => {
+              if (confirm('Delete this message and everything after it?')) {
+                onRewind(msg.id!)
+              }
+            }}
+            className="opacity-0 group-hover:opacity-100 text-[10px] text-zinc-600 hover:text-red-400 transition-opacity"
+            title="Delete this and all following messages"
+          >
+            rewind from here
+          </button>
+        )}
+      </div>
+
+      {/* Status spinner */}
+      {msg.role === 'assistant' && msg.status && !msg.content && (
+        <div className="flex items-center gap-2 text-xs text-zinc-500 mb-2 px-4 py-2 bg-zinc-900/50 rounded border border-zinc-800">
+          <span className="animate-spin inline-block w-3 h-3 border border-zinc-500 border-t-transparent rounded-full" />
+          {msg.status}
+        </div>
+      )}
+
+      {/* Oracle responses (collapsible) — shows outgoing query + incoming response */}
+      {msg.oracles && msg.oracles.length > 0 && (
+        <div className="mb-2 space-y-1">
+          {msg.oracles.map((oracle, j) => (
+            <OracleBlock key={j} oracle={oracle} />
+          ))}
+        </div>
+      )}
+
+      {/* Dispatch badges (collapsible, live-tracked) */}
+      {msg.dispatches && msg.dispatches.length > 0 && (
+        <div className="mb-2 space-y-1">
+          {msg.dispatches.map((d) => (
+            <DispatchBadge key={d.runId} dispatch={d} />
+          ))}
+        </div>
+      )}
+
+      {/* Message content */}
+      <div
+        className={`rounded-lg px-4 py-3 text-sm ${
+          msg.role === 'user'
+            ? 'bg-zinc-800 text-zinc-100 whitespace-pre-wrap'
+            : msg.role === 'system'
+            ? 'bg-emerald-950 border border-emerald-800 text-emerald-300 font-mono whitespace-pre-wrap'
+            : 'bg-zinc-900 border border-zinc-800 text-zinc-300 prose prose-sm prose-invert max-w-none prose-p:my-2 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-li:my-0 prose-pre:bg-zinc-800 prose-pre:border prose-pre:border-zinc-700 prose-code:text-emerald-400 prose-strong:text-zinc-100'
+        }`}
+      >
+        {msg.role === 'assistant' && msg.content ? (
+          <AssistantMarkdown content={msg.content} />
+        ) : msg.role === 'assistant' && !msg.content && !msg.status ? (
+          loading && isLast ? (
+            <span className="text-zinc-600">Querying oracles...</span>
+          ) : null
+        ) : (
+          msg.content || null
+        )}
+      </div>
+    </div>
+  )
+})
+
+// Heavy markdown pipeline — memoize by content so we don't re-parse during
+// unrelated parent re-renders. React-markdown renders synchronously on the
+// main thread; on long messages this is the biggest per-frame cost.
+const AssistantMarkdown = memo(function AssistantMarkdown({ content }: { content: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+      {stripSentinel(content)}
+    </ReactMarkdown>
+  )
+})
+
+const OracleBlock = memo(function OracleBlock({ oracle }: { oracle: OracleResponse }) {
+  return (
+    <details className="bg-zinc-900 border border-zinc-800 rounded text-xs">
+      <summary className="px-3 py-1.5 cursor-pointer text-zinc-400 hover:text-zinc-200">
+        Oracle: <span className="font-medium text-amber-400">{oracle.domain}</span>
+        <span className="text-zinc-600 ml-2">Q: {oracle.question.slice(0, 60)}{oracle.question.length > 60 ? '...' : ''}</span>
+      </summary>
+      <div className="border-t border-zinc-800 divide-y divide-zinc-800 max-h-96 overflow-y-auto">
+        <div className="px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Query sent</div>
+          <div className="text-zinc-300 prose prose-sm prose-invert max-w-none prose-p:my-1 prose-pre:bg-zinc-800 prose-code:text-emerald-400">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{oracle.question}</ReactMarkdown>
+          </div>
+        </div>
+        <div className="px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Response</div>
+          <div className="text-zinc-300 prose prose-sm prose-invert max-w-none prose-p:my-1 prose-pre:bg-zinc-800 prose-code:text-emerald-400">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{oracle.response}</ReactMarkdown>
+          </div>
+        </div>
+      </div>
+    </details>
+  )
+})
+
 const TERMINAL_RUN_STATUSES = new Set(['success', 'failure', 'cancelled', 'no_changes'])
 
-function DispatchBadge({ dispatch }: { dispatch: DispatchInfo }) {
+const DispatchBadge = memo(function DispatchBadge({ dispatch }: { dispatch: DispatchInfo }) {
   const [run, setRun] = useState<DeveloperRun | null>(null)
   const [now, setNow] = useState<number>(() => Date.now())
+  const [editing, setEditing] = useState(false)
+  const [editText, setEditText] = useState(dispatch.instructions)
+  const [actionBusy, setActionBusy] = useState<null | 'approve' | 'cancel' | 'edit'>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
 
   // Poll the run until it reaches a terminal status; re-poll on mount so
   // reloading the chat also shows the up-to-date state for historical runs.
@@ -493,19 +567,28 @@ function DispatchBadge({ dispatch }: { dispatch: DispatchInfo }) {
 
   // Wall-clock tick for live timer while running.
   useEffect(() => {
-    if (run && TERMINAL_RUN_STATUSES.has(run.status)) return
+    if (!run) return
+    if (TERMINAL_RUN_STATUSES.has(run.status)) return
+    if (run.status !== 'running') return
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
   }, [run])
 
-  const status = run?.status ?? (dispatch.queued ? 'pending' : 'running')
+  // Seed edit field from the authoritative run.instructions once we have it.
+  useEffect(() => {
+    if (run && !editing) setEditText(run.instructions)
+  }, [run, editing])
+
+  const status = run?.status ?? (dispatch.pending ? 'pending' : dispatch.queued ? 'queued' : 'running')
   const isTerminal = TERMINAL_RUN_STATUSES.has(status)
+  const isPending = status === 'pending'
   const startedAt = run?.startedAt ? new Date(run.startedAt).getTime() : null
   const finishedAt = run?.finishedAt ? new Date(run.finishedAt).getTime() : null
   const elapsed = startedAt ? ((finishedAt ?? now) - startedAt) : null
 
   const statusColor: Record<string, string> = {
-    pending: 'text-zinc-400',
+    pending: 'text-amber-400',
+    queued: 'text-zinc-400',
     running: 'text-yellow-400',
     success: 'text-green-400',
     failure: 'text-red-400',
@@ -513,12 +596,56 @@ function DispatchBadge({ dispatch }: { dispatch: DispatchInfo }) {
     no_changes: 'text-blue-400',
   }
 
+  const approve = async () => {
+    setActionBusy('approve')
+    setActionError(null)
+    try {
+      const updated = await developersApi.approveRun(dispatch.developerId, dispatch.runId)
+      setRun(updated)
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Approve failed')
+    } finally {
+      setActionBusy(null)
+    }
+  }
+
+  const cancel = async () => {
+    if (!confirm('Cancel this dispatch? This cannot be undone.')) return
+    setActionBusy('cancel')
+    setActionError(null)
+    try {
+      const updated = await developersApi.cancelRun(dispatch.developerId, dispatch.runId)
+      setRun(updated)
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Cancel failed')
+    } finally {
+      setActionBusy(null)
+    }
+  }
+
+  const saveEdit = async () => {
+    const next = editText.trim()
+    if (!next) return
+    setActionBusy('edit')
+    setActionError(null)
+    try {
+      const updated = await developersApi.editRunInstructions(dispatch.developerId, dispatch.runId, next)
+      setRun(updated)
+      setEditing(false)
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Edit failed')
+    } finally {
+      setActionBusy(null)
+    }
+  }
+
   const trailer = (run?.trailer || {}) as Record<string, unknown>
   const pickStr = (k: string) => (typeof trailer[k] === 'string' ? (trailer[k] as string) : undefined)
   const pickNum = (k: string) => (typeof trailer[k] === 'number' ? (trailer[k] as number) : undefined)
+  const instructionsDisplay = run?.instructions ?? dispatch.instructions
 
   return (
-    <details className="bg-zinc-900 border border-zinc-800 rounded text-xs">
+    <details className="bg-zinc-900 border border-zinc-800 rounded text-xs" open={isPending}>
       <summary className="px-3 py-1.5 cursor-pointer text-zinc-400 hover:text-zinc-200 flex items-center gap-2 flex-wrap">
         <span>Dispatch:</span>
         <span className="font-medium text-indigo-400">{dispatch.developer}</span>
@@ -543,6 +670,45 @@ function DispatchBadge({ dispatch }: { dispatch: DispatchInfo }) {
         </a>
       </summary>
       <div className="border-t border-zinc-800 divide-y divide-zinc-800 max-h-[32rem] overflow-y-auto">
+        {/* Approval controls (pending only). Badge opens by default when pending. */}
+        {isPending && (
+          <div className="px-3 py-2 bg-amber-950/20">
+            <div className="text-[10px] uppercase tracking-wide text-amber-400 mb-1">
+              Awaiting your approval
+            </div>
+            <div className="text-zinc-300">
+              Review the dispatch below, then approve to send it to <span className="text-indigo-400">{dispatch.developer}</span> for execution. Cancel skips execution entirely.
+            </div>
+            <div className="flex gap-2 mt-2 items-center" onClick={(e) => e.stopPropagation()}>
+              <button
+                type="button"
+                onClick={approve}
+                disabled={!!actionBusy || editing}
+                className="px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {actionBusy === 'approve' ? 'Approving…' : 'Approve'}
+              </button>
+              <button
+                type="button"
+                onClick={cancel}
+                disabled={!!actionBusy || editing}
+                className="px-2 py-1 rounded bg-red-900 hover:bg-red-800 text-white text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {actionBusy === 'cancel' ? 'Cancelling…' : 'Cancel'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setEditing((v) => !v)}
+                disabled={!!actionBusy}
+                className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {editing ? 'Discard edit' : 'Edit'}
+              </button>
+              {actionError && <span className="text-red-400 text-[11px]">{actionError}</span>}
+            </div>
+          </div>
+        )}
+
         {/* Data in: instructions + mode + developer */}
         <div className="px-3 py-2">
           <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">
@@ -550,7 +716,36 @@ function DispatchBadge({ dispatch }: { dispatch: DispatchInfo }) {
             {run?.provider && <> · provider <span className="text-zinc-300 font-mono">{run.provider}</span></>}
             {run?.model && <> · model <span className="text-zinc-300 font-mono">{run.model}</span></>}
           </div>
-          <ExpandableMarkdown source={dispatch.instructions} />
+          {editing && isPending ? (
+            <div onClick={(e) => e.stopPropagation()}>
+              <textarea
+                value={editText}
+                onChange={(e) => setEditText(e.target.value)}
+                className="w-full min-h-[180px] bg-zinc-950 border border-zinc-700 rounded-md px-2 py-1.5 text-zinc-100 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-zinc-500"
+                disabled={!!actionBusy}
+              />
+              <div className="flex gap-2 mt-1">
+                <button
+                  type="button"
+                  onClick={saveEdit}
+                  disabled={!!actionBusy || !editText.trim() || editText.trim() === instructionsDisplay}
+                  className="px-2 py-1 rounded bg-emerald-800 hover:bg-emerald-700 text-white text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {actionBusy === 'edit' ? 'Saving…' : 'Save edit'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setEditing(false); setEditText(instructionsDisplay) }}
+                  disabled={!!actionBusy}
+                  className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Cancel edit
+                </button>
+              </div>
+            </div>
+          ) : (
+            <ExpandableMarkdown source={instructionsDisplay} />
+          )}
         </div>
 
         {/* Data out: current status / final report / trailer */}
@@ -564,7 +759,13 @@ function DispatchBadge({ dispatch }: { dispatch: DispatchInfo }) {
             <pre className="text-red-400 whitespace-pre-wrap break-words font-mono">{run.errorMessage}</pre>
           ) : (
             <p className="text-zinc-500">
-              {status === 'pending' ? 'Waiting for an idle developer…' : 'Running…'}
+              {status === 'pending'
+                ? 'Awaiting your approval.'
+                : status === 'queued'
+                ? 'Queued — waiting for an idle developer…'
+                : status === 'cancelled'
+                ? 'Cancelled before execution.'
+                : 'Running…'}
             </p>
           )}
           {run?.pushStatus === 'failed' && run.pushError && (
@@ -627,7 +828,7 @@ function DispatchBadge({ dispatch }: { dispatch: DispatchInfo }) {
       </div>
     </details>
   )
-}
+})
 
 // Markdown renderer that collapses long content behind a Show full / Show less
 // toggle. Used inside dispatch badges where a multi-paragraph task description
