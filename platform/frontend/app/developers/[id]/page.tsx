@@ -29,6 +29,10 @@ export default function DeveloperDetailPage() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const logScrollRef = useRef<HTMLDivElement>(null)
 
+  // Wall-clock tick so in-progress durations advance independently of the
+  // event stream / run poll. formatDuration reads `now` below.
+  const now = useNow(1000)
+
   const refreshRuns = useCallback(() => {
     developersApi.listRuns(id).then(setRuns).catch(() => {})
   }, [id])
@@ -239,7 +243,7 @@ export default function DeveloperDetailPage() {
                         </span>
                       </div>
                       <span className="text-xs text-zinc-500">
-                        {formatDuration(run.startedAt, run.finishedAt)}
+                        {formatDuration(run.startedAt, run.finishedAt, now)}
                       </span>
                     </div>
                     <p className="text-sm text-zinc-300 truncate">{run.instructions}</p>
@@ -388,23 +392,33 @@ function RunStatusBadge({ status }: { status: string }) {
 }
 
 const EVENT_ICONS: Record<string, string> = {
-  thinking: '·',
-  tool_use: '>',
-  tool_result: '<',
-  message: '=',
-  error: '!',
-  complete: 'o',
-  init: '+',
+  assistant: '>',
+  user: '<',
+  system: '!',
+  progress: '·',
+  result: 'o',
+  raw: '-',
+  stderr: 'e',
+  'queue-operation': '~',
+  'file-history-snapshot': '#',
+  'last-prompt': 'p',
+  'ai-title': 't',
+  attachment: '@',
 }
 
 const EVENT_COLORS: Record<string, string> = {
-  thinking: 'text-zinc-500',
-  tool_use: 'text-blue-400',
-  tool_result: 'text-cyan-400',
-  message: 'text-zinc-200',
-  error: 'text-red-400',
-  complete: 'text-green-400',
-  init: 'text-zinc-400',
+  assistant: 'text-blue-400',
+  user: 'text-cyan-400',
+  system: 'text-amber-400',
+  progress: 'text-zinc-500',
+  result: 'text-green-400',
+  raw: 'text-zinc-400',
+  stderr: 'text-red-400',
+  'queue-operation': 'text-zinc-600',
+  'file-history-snapshot': 'text-zinc-500',
+  'last-prompt': 'text-zinc-400',
+  'ai-title': 'text-zinc-400',
+  attachment: 'text-zinc-400',
 }
 
 function LogEntry({ log }: { log: DeveloperLog }) {
@@ -430,16 +444,160 @@ function LogEntry({ log }: { log: DeveloperLog }) {
 }
 
 function extractLogText(log: DeveloperLog): string {
-  const d = log.data as Record<string, unknown>
+  const d = (log.data as Record<string, unknown>) || {}
+  switch (log.eventType) {
+    case 'assistant':
+      return formatAssistantEvent(d)
+    case 'user':
+      return formatUserEvent(d)
+    case 'system':
+      return formatSystemEvent(d)
+    case 'progress':
+      return formatProgressEvent(d)
+    case 'result':
+      return formatResultEvent(d)
+    case 'queue-operation':
+      return typeof d.operation === 'string' ? d.operation : fallbackText(d)
+    case 'file-history-snapshot':
+      return formatFileHistoryEvent(d)
+    case 'last-prompt':
+      return typeof d.lastPrompt === 'string' ? d.lastPrompt : fallbackText(d)
+    case 'ai-title':
+      return typeof d.aiTitle === 'string' ? d.aiTitle : fallbackText(d)
+    case 'attachment':
+      return formatAttachmentEvent(d)
+    case 'raw':
+    case 'stderr':
+      return typeof d.text === 'string' ? d.text : fallbackText(d)
+    default:
+      return fallbackText(d)
+  }
+}
+
+function formatAssistantEvent(d: Record<string, unknown>): string {
+  const msg = (d.message as { content?: unknown } | undefined) || {}
+  const content = msg.content
+  if (!Array.isArray(content)) return fallbackText(d)
+  const parts: string[] = []
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue
+    const b = block as Record<string, unknown>
+    if (b.type === 'text' && typeof b.text === 'string') {
+      parts.push(b.text)
+    } else if (b.type === 'thinking' && typeof b.thinking === 'string') {
+      parts.push(`[thinking] ${b.thinking}`)
+    } else if (b.type === 'tool_use') {
+      const name = typeof b.name === 'string' ? b.name : 'tool'
+      const input =
+        b.input && typeof b.input === 'object'
+          ? JSON.stringify(b.input, null, 2)
+          : ''
+      parts.push(input ? `${name}(\n${input}\n)` : `${name}()`)
+    }
+  }
+  return parts.length > 0 ? parts.join('\n\n') : fallbackText(d)
+}
+
+function formatUserEvent(d: Record<string, unknown>): string {
+  const msg = (d.message as { content?: unknown } | undefined) || {}
+  const content = msg.content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return fallbackText(d)
+  const parts: string[] = []
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue
+    const b = block as Record<string, unknown>
+    if (b.type === 'text' && typeof b.text === 'string') {
+      parts.push(b.text)
+    } else if (b.type === 'tool_result') {
+      const c = b.content
+      const err = b.is_error ? '[error] ' : ''
+      if (typeof c === 'string') {
+        parts.push(`${err}${c}`)
+      } else if (Array.isArray(c)) {
+        const inner = c
+          .map((x) => {
+            if (x && typeof x === 'object') {
+              const xb = x as Record<string, unknown>
+              if (typeof xb.text === 'string') return xb.text
+            }
+            return ''
+          })
+          .filter(Boolean)
+          .join('\n')
+        if (inner) parts.push(`${err}${inner}`)
+      }
+    }
+  }
+  return parts.length > 0 ? parts.join('\n\n') : fallbackText(d)
+}
+
+function formatSystemEvent(d: Record<string, unknown>): string {
+  const subtype = typeof d.subtype === 'string' ? d.subtype : 'system'
+  if (subtype === 'init') {
+    const bits: string[] = [`[${subtype}]`]
+    if (Array.isArray(d.tools)) bits.push(`tools=${d.tools.length}`)
+    if (typeof d.cwd === 'string') bits.push(`cwd=${d.cwd}`)
+    if (typeof d.model === 'string') bits.push(`model=${d.model}`)
+    if (typeof d.session_id === 'string') bits.push(`session=${d.session_id}`)
+    return bits.join(' ')
+  }
+  if (subtype === 'api_error') {
+    const err = d.error as Record<string, unknown> | undefined
+    const inner = err && (err.error as Record<string, unknown> | undefined)
+    const innerErr = inner && (inner.error as Record<string, unknown> | undefined)
+    const message =
+      (innerErr && typeof innerErr.message === 'string' && innerErr.message) ||
+      (inner && typeof inner.message === 'string' && inner.message) ||
+      ''
+    const attempt =
+      d.retryAttempt != null
+        ? ` (retry ${d.retryAttempt}/${d.maxRetries ?? '?'})`
+        : ''
+    return `[${subtype}] ${message}${attempt}`
+  }
+  return `[${subtype}] ${fallbackText(d)}`
+}
+
+function formatProgressEvent(d: Record<string, unknown>): string {
+  const inner = (d.data as Record<string, unknown> | undefined) || {}
+  const innerType = typeof inner.type === 'string' ? inner.type : 'progress'
+  const hook = typeof inner.hookName === 'string' ? inner.hookName : ''
+  return hook ? `${innerType} ${hook}` : innerType
+}
+
+function formatResultEvent(d: Record<string, unknown>): string {
+  if (typeof d.result === 'string') return d.result
+  if (typeof d.stop_reason === 'string') return `stop_reason=${d.stop_reason}`
+  return fallbackText(d)
+}
+
+function formatFileHistoryEvent(d: Record<string, unknown>): string {
+  const snap = (d.snapshot as Record<string, unknown> | undefined) || {}
+  const backups = snap.trackedFileBackups
+  const tracked =
+    backups && typeof backups === 'object'
+      ? Object.keys(backups as Record<string, unknown>).length
+      : 0
+  const update = d.isSnapshotUpdate ? ' (update)' : ''
+  return `snapshot: ${tracked} tracked file${tracked === 1 ? '' : 's'}${update}`
+}
+
+function formatAttachmentEvent(d: Record<string, unknown>): string {
+  const att = (d.attachment as Record<string, unknown> | undefined) || {}
+  const t = typeof att.type === 'string' ? att.type : 'attachment'
+  if (t === 'deferred_tools_delta') {
+    const added = Array.isArray(att.addedNames) ? att.addedNames.length : 0
+    const removed = Array.isArray(att.removedNames) ? att.removedNames.length : 0
+    return `deferred_tools_delta: +${added} -${removed}`
+  }
+  return t
+}
+
+function fallbackText(d: Record<string, unknown>): string {
   if (!d) return ''
   if (typeof d.text === 'string') return d.text
-  if (typeof d.content === 'string') return d.content
   if (typeof d.message === 'string') return d.message
-  if (typeof d.name === 'string') {
-    const input = d.input ? `\n${JSON.stringify(d.input, null, 2)}` : ''
-    return `${d.name}${input}`
-  }
-  if (typeof d.output === 'string') return d.output
   try {
     return JSON.stringify(d, null, 2)
   } catch {
@@ -503,10 +661,23 @@ function buildDiffUrl(gitRepo: string, start: string, end: string): string | nul
   return null
 }
 
-function formatDuration(startedAt: string | null, finishedAt: string | null): string {
+function useNow(intervalMs: number = 1000): number {
+  const [now, setNow] = useState<number>(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), intervalMs)
+    return () => clearInterval(id)
+  }, [intervalMs])
+  return now
+}
+
+function formatDuration(
+  startedAt: string | null,
+  finishedAt: string | null,
+  now: number = Date.now(),
+): string {
   if (!startedAt) return '—'
   const start = new Date(startedAt).getTime()
-  const end = finishedAt ? new Date(finishedAt).getTime() : Date.now()
+  const end = finishedAt ? new Date(finishedAt).getTime() : now
   const ms = Math.max(0, end - start)
   if (ms < 1000) return `${ms}ms`
   const s = Math.floor(ms / 1000)
