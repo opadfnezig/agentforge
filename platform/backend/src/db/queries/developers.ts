@@ -68,6 +68,8 @@ const toRun = (row: DbDeveloperRun): DeveloperRun => ({
   durationApiMs: row.duration_api_ms ?? null,
   stopReason: row.stop_reason ?? null,
   trailer: parseNullableJson(row.trailer),
+  pushStatus: (row.push_status as 'pushed' | 'failed' | 'not_attempted' | null) ?? null,
+  pushError: row.push_error ?? null,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 })
@@ -190,6 +192,8 @@ export interface UpdateRunInput {
   durationApiMs?: number | null
   stopReason?: string | null
   trailer?: Record<string, unknown> | null
+  pushStatus?: 'pushed' | 'failed' | 'not_attempted' | null
+  pushError?: string | null
 }
 
 export const updateRun = async (id: string, data: UpdateRunInput): Promise<DeveloperRun | null> => {
@@ -211,6 +215,8 @@ export const updateRun = async (id: string, data: UpdateRunInput): Promise<Devel
   if (data.trailer !== undefined) {
     updateData.trailer = (data.trailer === null ? null : JSON.stringify(data.trailer)) as any
   }
+  if (data.pushStatus !== undefined) updateData.push_status = data.pushStatus
+  if (data.pushError !== undefined) updateData.push_error = data.pushError
 
   const [row] = await db<DbDeveloperRun>('developer_runs')
     .where({ id })

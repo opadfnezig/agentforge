@@ -32,6 +32,8 @@ type IncomingMessage =
       git_sha_end?: string | null
       response?: string | null
       error?: string | null
+      push_status?: 'pushed' | 'failed' | 'not_attempted' | null
+      push_error?: string | null
     }
   | { type: 'heartbeat' }
 
@@ -262,6 +264,8 @@ class DeveloperRegistry {
             gitShaEnd: msg.git_sha_end ?? undefined,
             response: msg.response ?? undefined,
             errorMessage: msg.error ?? undefined,
+            pushStatus: msg.push_status ?? undefined,
+            pushError: msg.push_error ?? undefined,
             finishedAt: isTerminal(msg.status) ? new Date() : undefined,
           })
           if (updated) {

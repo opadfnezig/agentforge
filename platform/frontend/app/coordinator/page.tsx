@@ -524,6 +524,9 @@ function DispatchBadge({ dispatch }: { dispatch: DispatchInfo }) {
         <span className="font-medium text-indigo-400">{dispatch.developer}</span>
         <span className="px-1 py-0.5 rounded bg-zinc-800 text-zinc-400 font-mono">{dispatch.mode}</span>
         <span className={`font-medium ${statusColor[status] || 'text-zinc-400'}`}>{status}</span>
+        {run?.pushStatus && run.pushStatus !== 'not_attempted' && (
+          <PushStatusBadge pushStatus={run.pushStatus} pushError={run.pushError} />
+        )}
         {run?.model && <span className="text-zinc-500 font-mono">{run.model}</span>}
         {elapsed !== null && (
           <span className="text-zinc-500 font-mono">{formatElapsed(elapsed)}</span>
@@ -547,9 +550,7 @@ function DispatchBadge({ dispatch }: { dispatch: DispatchInfo }) {
             {run?.provider && <> · provider <span className="text-zinc-300 font-mono">{run.provider}</span></>}
             {run?.model && <> · model <span className="text-zinc-300 font-mono">{run.model}</span></>}
           </div>
-          <div className="text-zinc-300 prose prose-sm prose-invert max-w-none prose-p:my-1 prose-pre:bg-zinc-800 prose-code:text-emerald-400">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{dispatch.instructions}</ReactMarkdown>
-          </div>
+          <ExpandableMarkdown source={dispatch.instructions} />
         </div>
 
         {/* Data out: current status / final report / trailer */}
@@ -558,15 +559,23 @@ function DispatchBadge({ dispatch }: { dispatch: DispatchInfo }) {
             {isTerminal ? 'Result' : 'Current status'}
           </div>
           {run?.response ? (
-            <div className="text-zinc-300 prose prose-sm prose-invert max-w-none prose-p:my-1 prose-pre:bg-zinc-800 prose-code:text-emerald-400">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{run.response}</ReactMarkdown>
-            </div>
+            <ExpandableMarkdown source={run.response} maxChars={400} />
           ) : run?.errorMessage ? (
             <pre className="text-red-400 whitespace-pre-wrap break-words font-mono">{run.errorMessage}</pre>
           ) : (
             <p className="text-zinc-500">
               {status === 'pending' ? 'Waiting for an idle developer…' : 'Running…'}
             </p>
+          )}
+          {run?.pushStatus === 'failed' && run.pushError && (
+            <div className="mt-2 rounded border border-red-900/60 bg-red-950/30 px-2 py-1.5">
+              <div className="text-[10px] uppercase tracking-wide text-red-400 mb-0.5">
+                push failed (work completed)
+              </div>
+              <pre className="text-red-300 whitespace-pre-wrap break-words font-mono text-[11px]">
+                {run.pushError}
+              </pre>
+            </div>
           )}
 
           {isTerminal && run && (
@@ -620,6 +629,51 @@ function DispatchBadge({ dispatch }: { dispatch: DispatchInfo }) {
   )
 }
 
+// Markdown renderer that collapses long content behind a Show full / Show less
+// toggle. Used inside dispatch badges where a multi-paragraph task description
+// would otherwise dominate the chat scroll.
+function ExpandableMarkdown({
+  source,
+  maxChars = 280,
+}: {
+  source: string
+  maxChars?: number
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const className =
+    'text-zinc-300 prose prose-sm prose-invert max-w-none prose-p:my-1 prose-pre:bg-zinc-800 prose-code:text-emerald-400'
+  const isLong = source.length > maxChars || source.split('\n').length > 4
+  if (!isLong) {
+    return (
+      <div className={className}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{source}</ReactMarkdown>
+      </div>
+    )
+  }
+  return (
+    <div>
+      <div
+        className={`${className} ${expanded ? '' : 'relative max-h-24 overflow-hidden'}`}
+      >
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{source}</ReactMarkdown>
+        {!expanded && (
+          <div className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-zinc-900 to-transparent pointer-events-none" />
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation()
+          setExpanded((v) => !v)
+        }}
+        className="mt-1 text-[11px] text-zinc-400 hover:text-zinc-200 underline-offset-2 hover:underline"
+      >
+        {expanded ? 'Show less' : 'Show full'}
+      </button>
+    </div>
+  )
+}
+
 function formatElapsed(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return '—'
   if (ms < 1000) return `${Math.round(ms)}ms`
@@ -628,4 +682,31 @@ function formatElapsed(ms: number): string {
   const m = Math.floor(s / 60)
   const rem = s % 60
   return `${m}m ${rem}s`
+}
+
+function PushStatusBadge({
+  pushStatus,
+  pushError,
+}: {
+  pushStatus: 'pushed' | 'failed' | 'not_attempted'
+  pushError: string | null
+}) {
+  if (pushStatus === 'pushed') {
+    return (
+      <span className="px-1 py-0.5 rounded bg-green-950/50 text-green-400 text-[10px] font-mono border border-green-900/50">
+        pushed
+      </span>
+    )
+  }
+  if (pushStatus === 'failed') {
+    return (
+      <span
+        className="px-1 py-0.5 rounded bg-red-950/50 text-red-400 text-[10px] font-mono border border-red-900/50"
+        title={pushError || 'push failed'}
+      >
+        push failed
+      </span>
+    )
+  }
+  return null
 }

@@ -314,18 +314,22 @@ class DeveloperClient {
         runId,
         status: 'success',
         response: finalAssistantText,
+        push_status: 'not_attempted',
       });
       this.currentRun = null;
       return;
     }
 
-    // implement mode — commit if changes (and if git repo)
+    // implement mode — commit if changes (and if git repo).
+    // Work success is independent of push success: a failed push must not
+    // flip a completed run to 'failure'. push_status carries the push outcome.
     if (!isGitRepo) {
       this.send({
         type: 'run_update',
         runId,
         status: 'success',
         response: finalAssistantText,
+        push_status: 'not_attempted',
       });
       this.currentRun = null;
       return;
@@ -339,8 +343,10 @@ class DeveloperClient {
       this.send({
         type: 'run_update',
         runId,
-        status: 'failure',
-        error_message: `git status failed: ${(err as Error).message}`,
+        status: 'success',
+        response: finalAssistantText,
+        push_status: 'failed',
+        push_error: `git status failed: ${(err as Error).message}`,
       });
       this.currentRun = null;
       return;
@@ -354,6 +360,7 @@ class DeveloperClient {
         status: 'no_changes',
         git_sha_end: sha,
         response: finalAssistantText,
+        push_status: 'not_attempted',
       });
       this.currentRun = null;
       return;
@@ -366,11 +373,18 @@ class DeveloperClient {
       await gitCommitAndPush(this.config.workspacePath, commitMessage, this.config.gitBranch);
     } catch (err) {
       logErr('git commit/push failed', err);
+      // Work succeeded; push didn't. Record overall run as success, and
+      // surface the push problem via push_status/push_error so the UI can
+      // badge it separately.
+      const sha = await gitHeadSha(this.config.workspacePath).catch(() => '');
       this.send({
         type: 'run_update',
         runId,
-        status: 'failure',
-        error_message: `git commit/push failed: ${(err as Error).message}`,
+        status: 'success',
+        git_sha_end: sha,
+        response: finalAssistantText,
+        push_status: 'failed',
+        push_error: `git commit/push failed: ${(err as Error).message}`,
       });
       this.currentRun = null;
       return;
@@ -383,6 +397,7 @@ class DeveloperClient {
       status: 'success',
       git_sha_end: gitShaEnd,
       response: finalAssistantText,
+      push_status: 'pushed',
     });
     this.currentRun = null;
   }

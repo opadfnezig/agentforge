@@ -65,6 +65,8 @@ export const developerRunSchema = z.object({
   durationApiMs: z.number().nullable(),
   stopReason: z.string().nullable(),
   trailer: z.record(z.unknown()).nullable(),
+  pushStatus: z.enum(['pushed', 'failed', 'not_attempted']).nullable(),
+  pushError: z.string().nullable(),
   createdAt: z.date(),
   updatedAt: z.date(),
 })

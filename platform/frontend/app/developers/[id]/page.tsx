@@ -243,6 +243,9 @@ export default function DeveloperDetailPage() {
                         <span className="px-1.5 py-0.5 text-xs rounded bg-zinc-800 text-zinc-400">
                           {run.mode}
                         </span>
+                        {run.pushStatus && run.pushStatus !== 'not_attempted' && (
+                          <PushStatusBadge pushStatus={run.pushStatus} pushError={run.pushError} />
+                        )}
                         {run.model && (
                           <span className="px-1.5 py-0.5 text-xs rounded bg-zinc-800 text-zinc-500 font-mono">
                             {run.model}
@@ -253,9 +256,8 @@ export default function DeveloperDetailPage() {
                         {formatDuration(run.startedAt, run.finishedAt, now)}
                       </span>
                     </div>
-                    <div className="text-sm text-zinc-300 prose prose-sm prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 prose-pre:bg-zinc-800 prose-pre:border prose-pre:border-zinc-700 prose-code:text-emerald-400 prose-strong:text-zinc-100">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{run.instructions}</ReactMarkdown>
-                    </div>
+                    <ExpandableMarkdown source={run.instructions} />
+
                     <div className="flex items-center gap-2 mt-1 text-xs text-zinc-500 font-mono">
                       {run.gitShaStart && <span>{run.gitShaStart.slice(0, 7)}</span>}
                       {run.gitShaStart && run.gitShaEnd && <span>→</span>}
@@ -403,6 +405,79 @@ function RunStatusBadge({ status }: { status: string }) {
   )
 }
 
+// Markdown renderer that collapses long content behind a Show full / Show less
+// toggle. Used for dispatch task descriptions and run-stream assistant/user
+// messages. Keeps cards scannable while letting the user see full payload on
+// demand.
+function ExpandableMarkdown({
+  source,
+  maxChars = 280,
+  className = 'text-sm text-zinc-300 prose prose-sm prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 prose-pre:bg-zinc-800 prose-pre:border prose-pre:border-zinc-700 prose-code:text-emerald-400 prose-strong:text-zinc-100',
+}: {
+  source: string
+  maxChars?: number
+  className?: string
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const isLong = source.length > maxChars || source.split('\n').length > 4
+  if (!isLong) {
+    return (
+      <div className={className}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{source}</ReactMarkdown>
+      </div>
+    )
+  }
+  return (
+    <div>
+      <div
+        className={`${className} ${expanded ? '' : 'relative max-h-24 overflow-hidden'}`}
+      >
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{source}</ReactMarkdown>
+        {!expanded && (
+          <div className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-zinc-900 to-transparent pointer-events-none" />
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation()
+          setExpanded((v) => !v)
+        }}
+        className="mt-1 text-[11px] text-zinc-400 hover:text-zinc-200 underline-offset-2 hover:underline"
+      >
+        {expanded ? 'Show less' : 'Show full'}
+      </button>
+    </div>
+  )
+}
+
+function PushStatusBadge({
+  pushStatus,
+  pushError,
+}: {
+  pushStatus: 'pushed' | 'failed' | 'not_attempted'
+  pushError: string | null
+}) {
+  if (pushStatus === 'pushed') {
+    return (
+      <span className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-green-950/60 text-green-400 border border-green-900/60">
+        pushed
+      </span>
+    )
+  }
+  if (pushStatus === 'failed') {
+    return (
+      <span
+        className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-red-950/60 text-red-400 border border-red-900/60"
+        title={pushError || 'push failed'}
+      >
+        push failed
+      </span>
+    )
+  }
+  return null
+}
+
 const EVENT_ICONS: Record<string, string> = {
   assistant: '>',
   user: '<',
@@ -436,7 +511,6 @@ const EVENT_COLORS: Record<string, string> = {
 function LogEntry({ log }: { log: DeveloperLog }) {
   const icon = EVENT_ICONS[log.eventType] || '-'
   const color = EVENT_COLORS[log.eventType] || 'text-zinc-400'
-  const text = extractLogText(log)
   return (
     <div className="flex gap-2 text-sm font-mono leading-relaxed">
       <span className={`${color} shrink-0 w-4 text-center`}>{icon}</span>
@@ -445,14 +519,145 @@ function LogEntry({ log }: { log: DeveloperLog }) {
           <span>{log.eventType}</span>
           <span>{new Date(log.timestamp).toLocaleTimeString()}</span>
         </div>
-        {text && (
-          <pre className={`whitespace-pre-wrap break-words text-sm ${color}`}>
-            {text}
-          </pre>
-        )}
+        <LogBody log={log} color={color} />
       </div>
     </div>
   )
+}
+
+const STREAM_PROSE_CLASS =
+  'text-zinc-300 prose prose-sm prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 prose-pre:bg-zinc-800 prose-pre:border prose-pre:border-zinc-700 prose-code:text-emerald-400 prose-strong:text-zinc-100'
+
+function LogBody({ log, color }: { log: DeveloperLog; color: string }) {
+  // Claude conversation events (assistant + user) carry markdown; render each
+  // content block appropriately so prose reads nicely and tool_use JSON stays
+  // in a monospace box.
+  if (log.eventType === 'assistant') {
+    return <AssistantBlocks data={(log.data as Record<string, unknown>) || {}} />
+  }
+  if (log.eventType === 'user') {
+    return <UserBlocks data={(log.data as Record<string, unknown>) || {}} />
+  }
+  const text = extractLogText(log)
+  if (!text) return null
+  return (
+    <pre className={`whitespace-pre-wrap break-words text-sm ${color}`}>
+      {text}
+    </pre>
+  )
+}
+
+function AssistantBlocks({ data }: { data: Record<string, unknown> }) {
+  const msg = (data.message as { content?: unknown } | undefined) || {}
+  const content = msg.content
+  if (!Array.isArray(content)) {
+    const fallback = fallbackText(data)
+    return fallback ? (
+      <pre className="whitespace-pre-wrap break-words text-sm text-blue-400">{fallback}</pre>
+    ) : null
+  }
+  const nodes: React.ReactNode[] = []
+  content.forEach((block, i) => {
+    if (!block || typeof block !== 'object') return
+    const b = block as Record<string, unknown>
+    if (b.type === 'text' && typeof b.text === 'string' && b.text) {
+      nodes.push(
+        <div key={i} className={STREAM_PROSE_CLASS}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{b.text}</ReactMarkdown>
+        </div>
+      )
+    } else if (b.type === 'thinking' && typeof b.thinking === 'string') {
+      nodes.push(
+        <div
+          key={i}
+          className="text-xs italic text-zinc-500 whitespace-pre-wrap break-words"
+        >
+          [thinking] {b.thinking}
+        </div>
+      )
+    } else if (b.type === 'tool_use') {
+      const name = typeof b.name === 'string' ? b.name : 'tool'
+      const input =
+        b.input && typeof b.input === 'object'
+          ? JSON.stringify(b.input, null, 2)
+          : ''
+      nodes.push(
+        <pre
+          key={i}
+          className="whitespace-pre-wrap break-words text-xs text-blue-300 bg-zinc-900/60 border border-zinc-800 rounded px-2 py-1 font-mono"
+        >
+          {input ? `${name}(\n${input}\n)` : `${name}()`}
+        </pre>
+      )
+    }
+  })
+  return nodes.length > 0 ? <div className="space-y-1">{nodes}</div> : null
+}
+
+function UserBlocks({ data }: { data: Record<string, unknown> }) {
+  const msg = (data.message as { content?: unknown } | undefined) || {}
+  const content = msg.content
+  if (typeof content === 'string') {
+    return (
+      <div className={STREAM_PROSE_CLASS}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+      </div>
+    )
+  }
+  if (!Array.isArray(content)) {
+    const fallback = fallbackText(data)
+    return fallback ? (
+      <pre className="whitespace-pre-wrap break-words text-sm text-cyan-400">{fallback}</pre>
+    ) : null
+  }
+  const nodes: React.ReactNode[] = []
+  content.forEach((block, i) => {
+    if (!block || typeof block !== 'object') return
+    const b = block as Record<string, unknown>
+    if (b.type === 'text' && typeof b.text === 'string' && b.text) {
+      nodes.push(
+        <div key={i} className={STREAM_PROSE_CLASS}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{b.text}</ReactMarkdown>
+        </div>
+      )
+    } else if (b.type === 'tool_result') {
+      const c = b.content
+      const isErr = b.is_error === true
+      let inner = ''
+      if (typeof c === 'string') {
+        inner = c
+      } else if (Array.isArray(c)) {
+        inner = c
+          .map((x) => {
+            if (x && typeof x === 'object') {
+              const xb = x as Record<string, unknown>
+              if (typeof xb.text === 'string') return xb.text
+            }
+            return ''
+          })
+          .filter(Boolean)
+          .join('\n')
+      }
+      if (!inner) return
+      if (isErr) {
+        nodes.push(
+          <pre
+            key={i}
+            className="whitespace-pre-wrap break-words text-sm text-red-400"
+          >
+            {inner}
+          </pre>
+        )
+      } else {
+        nodes.push(
+          <div key={i} className={STREAM_PROSE_CLASS}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{inner}</ReactMarkdown>
+          </div>
+        )
+      }
+    }
+  })
+  return nodes.length > 0 ? <div className="space-y-1">{nodes}</div> : null
 }
 
 function extractLogText(log: DeveloperLog): string {
@@ -625,6 +830,9 @@ function RunSummary({ run, developer }: { run: DeveloperRun; developer: Develope
     <div className="mt-4 p-3 rounded border border-zinc-700 bg-zinc-900">
       <div className="flex items-center gap-2 mb-2 flex-wrap">
         <RunStatusBadge status={run.status} />
+        {run.pushStatus && run.pushStatus !== 'not_attempted' && (
+          <PushStatusBadge pushStatus={run.pushStatus} pushError={run.pushError} />
+        )}
         <span className="text-xs text-zinc-500">
           {formatDuration(run.startedAt, run.finishedAt)}
         </span>
@@ -641,10 +849,20 @@ function RunSummary({ run, developer }: { run: DeveloperRun; developer: Develope
           <span className="text-xs font-mono text-zinc-500">stop={run.stopReason}</span>
         )}
       </div>
+      {run.pushStatus === 'failed' && run.pushError && (
+        <div className="mb-2 rounded border border-red-900/60 bg-red-950/30 px-2 py-1.5">
+          <div className="text-[10px] uppercase tracking-wide text-red-400 mb-0.5">
+            push failed (work completed)
+          </div>
+          <pre className="text-red-300 whitespace-pre-wrap break-words font-mono text-[11px]">
+            {run.pushError}
+          </pre>
+        </div>
+      )}
       {run.response && (
-        <pre className="text-sm text-zinc-300 whitespace-pre-wrap font-mono mb-2">
-          {run.response}
-        </pre>
+        <div className="mb-2">
+          <ExpandableMarkdown source={run.response} maxChars={400} />
+        </div>
       )}
       {run.errorMessage && (
         <pre className="text-sm text-red-400 whitespace-pre-wrap font-mono mb-2">

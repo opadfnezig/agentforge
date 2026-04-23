@@ -443,6 +443,8 @@ export interface DeveloperRun {
   durationApiMs: number | null
   stopReason: string | null
   trailer: Record<string, unknown> | null
+  pushStatus: 'pushed' | 'failed' | 'not_attempted' | null
+  pushError: string | null
   createdAt: string
 }
 

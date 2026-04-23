@@ -197,6 +197,8 @@ export interface DbDeveloperRun {
   duration_api_ms: number | null
   stop_reason: string | null
   trailer: Record<string, unknown> | string | null
+  push_status: string | null
+  push_error: string | null
   created_at: Date
   updated_at: Date
 }
