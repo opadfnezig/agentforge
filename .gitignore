@@ -1,0 +1,88 @@
+# ---------------------------------------------------------------------------
+# AgentForge .gitignore
+# ---------------------------------------------------------------------------
+
+# Dependencies
+node_modules/
+.pnpm-store/
+jspm_packages/
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+.turbo/
+*.tsbuildinfo
+
+# Environment files (keep .env.example)
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Test / coverage
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+
+# IDE / editor
+.idea/
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json.example
+*.swp
+*.swo
+*.swn
+*~
+
+# OS junk
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime / local state (not committed)
+data/
+sessions_clean/
+yes_unpacked/
+yes.tar.gz
+
+# Nested third-party repo (separate @hearth/core project, has its own .git)
+core/
+
+# Docker runtime artifacts
+docker/agent/logs/
+
+# SQLite dev databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Local caches
+.cache/
+.parcel-cache/

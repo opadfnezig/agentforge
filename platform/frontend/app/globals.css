@@ -1,0 +1,153 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 3.9%;
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 240 4.8% 95.9%;
+    --secondary-foreground: 240 5.9% 10%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --accent: 240 4.8% 95.9%;
+    --accent-foreground: 240 5.9% 10%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 5.9% 90%;
+    --input: 240 5.9% 90%;
+    --ring: 240 5.9% 10%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 240 10% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 240 10% 3.9%;
+    --card-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 240 5.9% 10%;
+    --secondary: 240 3.7% 15.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%;
+    --accent: 240 3.7% 15.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 3.7% 15.9%;
+    --input: 240 3.7% 15.9%;
+    --ring: 240 4.9% 83.9%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+/* React Flow custom styles */
+.react-flow__node-action {
+  @apply bg-card border border-border rounded-lg shadow-sm;
+}
+
+.react-flow__edge-path {
+  stroke-width: 2;
+}
+
+.react-flow__edge.success .react-flow__edge-path {
+  stroke: #22c55e;
+}
+
+.react-flow__edge.failure .react-flow__edge-path {
+  stroke: #ef4444;
+}
+
+/* ReactFlow dark theme overrides */
+.react-flow__minimap {
+  background-color: hsl(var(--card)) !important;
+  border-radius: 0.5rem;
+  border: 1px solid hsl(var(--border)) !important;
+}
+
+.react-flow__minimap-mask {
+  fill: hsl(var(--background)) !important;
+  fill-opacity: 0.8;
+}
+
+.react-flow__minimap-node {
+  fill: hsl(var(--muted-foreground)) !important;
+  stroke: none;
+}
+
+.react-flow__controls {
+  background-color: hsl(var(--card)) !important;
+  border: 1px solid hsl(var(--border)) !important;
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+.react-flow__controls-button {
+  background-color: hsl(var(--card)) !important;
+  border: none !important;
+  border-bottom: 1px solid hsl(var(--border)) !important;
+  fill: hsl(var(--foreground)) !important;
+  color: hsl(var(--foreground)) !important;
+}
+
+.react-flow__controls-button:hover {
+  background-color: hsl(var(--accent)) !important;
+}
+
+.react-flow__controls-button:last-child {
+  border-bottom: none !important;
+}
+
+.react-flow__panel {
+  background-color: hsl(var(--card)) !important;
+  border: 1px solid hsl(var(--border)) !important;
+  border-radius: 0.5rem;
+  padding: 0.5rem;
+}
+
+.react-flow__attribution {
+  display: none;
+}
+
+/* Edge labels */
+.react-flow__edge-text {
+  fill: hsl(var(--muted-foreground)) !important;
+  font-size: 10px;
+}
+
+/* Monaco Editor */
+.monaco-editor {
+  @apply rounded-md;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-muted;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-muted-foreground/30 rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-muted-foreground/50;
+}

@@ -1,0 +1,112 @@
+# AgentForge Platform Docker Compose
+# Run with: docker-compose up -d
+
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: agentforge-postgres
+    environment:
+      POSTGRES_USER: agentforge
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secret}
+      POSTGRES_DB: agentforge
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agentforge-net
+    restart: unless-stopped
+
+  # Backend API Server
+  backend:
+    build:
+      context: ./platform/backend
+      dockerfile: Dockerfile
+    container_name: agentforge-backend
+    environment:
+      - DATABASE_URL=postgres://agentforge:${POSTGRES_PASSWORD:-secret}@postgres:5432/agentforge
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - PORT=3001
+      - FRONTEND_URL=http://172.16.5.10:3000
+      - DATA_DIR=/data
+      - DOCKER_SOCKET=/var/run/docker.sock
+      - AGENT_IMAGE=agentforge/claude-agent:latest
+      - NODE_ENV=development
+    volumes:
+      - ./data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ~/.claude:/mnt/claude-src:ro
+      - ~/.claude.json:/mnt/claude-src.json:ro
+    ports:
+      - "3001:3001"
+      - "8900-8910:8900-8910"  # code-server ports
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - agentforge-net
+    restart: unless-stopped
+
+  # Frontend Next.js App
+  frontend:
+    build:
+      context: ./platform/frontend
+      dockerfile: Dockerfile
+      args:
+        BACKEND_URL: http://backend:3001
+    container_name: agentforge-frontend
+    environment:
+      - BACKEND_URL=http://backend:3001
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - agentforge-net
+    restart: unless-stopped
+
+  # Agent Image Builder (one-time build)
+  agent-builder:
+    build:
+      context: ./docker/agent
+      dockerfile: Dockerfile
+    image: agentforge/claude-agent:latest
+    container_name: agentforge-agent-builder
+    command: echo "Agent image built successfully"
+
+  # Developer — standalone process that runs Claude Code on dispatch
+  developer:
+    build:
+      context: ./developer
+      dockerfile: Dockerfile
+    container_name: agentforge-developer
+    environment:
+      - COORDINATOR_URL=ws://backend:3001
+      - DEVELOPER_ID=${DEVELOPER_ID:-}
+      - DEVELOPER_SECRET=${DEVELOPER_SECRET:-}
+      - WORKSPACE_PATH=/workspace
+      - GIT_BRANCH=main
+    volumes:
+      - /home/user/agentforge:/workspace
+      - ~/.claude:/home/agent/.claude
+      - ~/.claude.json:/home/agent/.claude.json
+    depends_on:
+      - backend
+    networks:
+      - agentforge-net
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  agentforge-net:
+    driver: bridge
