@@ -98,6 +98,7 @@ services:
       - /home/user/agentforge:/workspace
       - ~/.claude:/home/agent/.claude
       - ~/.claude.json:/home/agent/.claude.json
+      - ~/.ssh:/mnt/ssh-src:ro
     depends_on:
       - backend
     networks:

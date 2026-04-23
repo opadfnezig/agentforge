@@ -435,6 +435,14 @@ export interface DeveloperRun {
   startedAt: string | null
   finishedAt: string | null
   errorMessage: string | null
+  provider: string | null
+  model: string | null
+  sessionId: string | null
+  totalCostUsd: number | null
+  durationMs: number | null
+  durationApiMs: number | null
+  stopReason: string | null
+  trailer: Record<string, unknown> | null
   createdAt: string
 }
 
@@ -459,6 +467,7 @@ export const developersApi = {
   listRuns: (id: string) => fetchAPI<DeveloperRun[]>(`/developers/${id}/runs`),
   getRun: (id: string, runId: string) => fetchAPI<DeveloperRun>(`/developers/${id}/runs/${runId}`),
   listLogs: (id: string, runId: string) => fetchAPI<DeveloperLog[]>(`/developers/${id}/runs/${runId}/logs`),
+  listQueue: (id: string) => fetchAPI<DeveloperRun[]>(`/developers/${id}/queue`),
 }
 
 export type {

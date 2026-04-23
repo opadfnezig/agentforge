@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Button } from '@/components/ui/button'
+import { developersApi, type DeveloperRun } from '@/lib/api'
 
 interface Chat {
   id: string
@@ -18,11 +19,21 @@ interface OracleResponse {
   response: string
 }
 
+interface DispatchInfo {
+  developer: string
+  developerId: string
+  mode: 'implement' | 'clarify'
+  runId: string
+  instructions: string
+  queued: boolean
+}
+
 interface Message {
   id?: string
   role: 'user' | 'assistant' | 'system'
   content: string
   oracles?: OracleResponse[]
+  dispatches?: DispatchInfo[]
   status?: string
 }
 
@@ -32,9 +43,11 @@ const hasSaveCommands = (text: string): boolean => {
   return SAVE_REGEX.test(text)
 }
 
-// Strip oracle-data sentinel (HTML comment) — belt-and-suspenders alongside loadChat
-const SENTINEL_REGEX = /\n*<!--ORACLES:[\s\S]*?:ORACLES-->\s*$/
-const stripSentinel = (text: string): string => text.replace(SENTINEL_REGEX, '')
+// Strip oracle/dispatch-data sentinels (HTML comment)
+const ORACLE_SENTINEL_REGEX = /\n*<!--ORACLES:[\s\S]*?:ORACLES-->\s*$/
+const DISPATCH_SENTINEL_REGEX = /\n*<!--DISPATCHES:[\s\S]*?:DISPATCHES-->\s*$/g
+const stripSentinel = (text: string): string =>
+  text.replace(ORACLE_SENTINEL_REGEX, '').replace(DISPATCH_SENTINEL_REGEX, '')
 
 export default function CoordinatorPage() {
   const [chats, setChats] = useState<Chat[]>([])
@@ -57,19 +70,21 @@ export default function CoordinatorPage() {
       const rawMessages = (data.messages || []) as { id: string; role: Message['role']; content: string }[]
       const restored: Message[] = rawMessages.map((m) => {
         if (m.role !== 'assistant') return { id: m.id, role: m.role, content: m.content }
-        const match = m.content.match(/<!--ORACLES:([\s\S]*?):ORACLES-->/)
-        if (!match) return { id: m.id, role: m.role, content: m.content }
-        try {
-          const oracles = JSON.parse(match[1]) as OracleResponse[]
-          return {
-            id: m.id,
-            role: 'assistant',
-            content: m.content.replace(/\n*<!--ORACLES:[\s\S]*?:ORACLES-->\s*$/, ''),
-            oracles,
-          }
-        } catch {
-          return { id: m.id, role: m.role, content: m.content }
+        let content = m.content
+        let oracles: OracleResponse[] | undefined
+        let dispatches: DispatchInfo[] | undefined
+        const oracleMatch = content.match(/<!--ORACLES:([\s\S]*?):ORACLES-->/)
+        if (oracleMatch) {
+          try { oracles = JSON.parse(oracleMatch[1]) as OracleResponse[] } catch { /* ignore */ }
         }
+        const dispatchMatch = content.match(/<!--DISPATCHES:([\s\S]*?):DISPATCHES-->/)
+        if (dispatchMatch) {
+          try { dispatches = JSON.parse(dispatchMatch[1]) as DispatchInfo[] } catch { /* ignore */ }
+        }
+        content = content
+          .replace(/\n*<!--ORACLES:[\s\S]*?:ORACLES-->\s*/g, '')
+          .replace(/\n*<!--DISPATCHES:[\s\S]*?:DISPATCHES-->\s*/g, '')
+        return { id: m.id, role: 'assistant', content, oracles, dispatches }
       })
       setMessages(restored)
       setActiveChatId(id)
@@ -155,7 +170,7 @@ export default function CoordinatorPage() {
     const assistantIdx = { current: -1 }
     setMessages(prev => {
       assistantIdx.current = prev.length
-      return [...prev, { role: 'assistant', content: '', oracles: [], status: '' }]
+      return [...prev, { role: 'assistant', content: '', oracles: [], dispatches: [], status: '' }]
     })
 
     try {
@@ -173,6 +188,7 @@ export default function CoordinatorPage() {
       let buffer = ''
       let accText = ''
       const accOracles: OracleResponse[] = []
+      const accDispatches: DispatchInfo[] = []
       let currentStatus = ''
 
       const updateAssistant = () => {
@@ -184,6 +200,7 @@ export default function CoordinatorPage() {
               role: 'assistant',
               content: accText,
               oracles: [...accOracles],
+              dispatches: [...accDispatches],
               status: currentStatus,
             }
           }
@@ -214,6 +231,19 @@ export default function CoordinatorPage() {
                 response: event.response,
               })
               currentStatus = `Got response from ${event.domain}`
+              updateAssistant()
+            } else if (event.type === 'dispatch') {
+              accDispatches.push({
+                developer: event.developer,
+                developerId: event.developerId,
+                mode: event.mode,
+                runId: event.runId,
+                instructions: event.instructions,
+                queued: !!event.queued,
+              })
+              currentStatus = event.queued
+                ? `Queued for ${event.developer}`
+                : `Dispatched to ${event.developer}`
               updateAssistant()
             } else if (event.type === 'text') {
               accText += event.text
@@ -347,7 +377,7 @@ Bonfire architecture now uses 4 stages
                     </div>
                   )}
 
-                  {/* Oracle responses (collapsible) */}
+                  {/* Oracle responses (collapsible) — shows outgoing query + incoming response */}
                   {msg.oracles && msg.oracles.length > 0 && (
                     <div className="mb-2 space-y-1">
                       {msg.oracles.map((oracle, j) => (
@@ -356,10 +386,30 @@ Bonfire architecture now uses 4 stages
                             Oracle: <span className="font-medium text-amber-400">{oracle.domain}</span>
                             <span className="text-zinc-600 ml-2">Q: {oracle.question.slice(0, 60)}{oracle.question.length > 60 ? '...' : ''}</span>
                           </summary>
-                          <div className="px-3 py-2 border-t border-zinc-800 text-zinc-400 whitespace-pre-wrap max-h-64 overflow-y-auto">
-                            {oracle.response}
+                          <div className="border-t border-zinc-800 divide-y divide-zinc-800 max-h-96 overflow-y-auto">
+                            <div className="px-3 py-2">
+                              <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Query sent</div>
+                              <div className="text-zinc-300 prose prose-sm prose-invert max-w-none prose-p:my-1 prose-pre:bg-zinc-800 prose-code:text-emerald-400">
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{oracle.question}</ReactMarkdown>
+                              </div>
+                            </div>
+                            <div className="px-3 py-2">
+                              <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Response</div>
+                              <div className="text-zinc-300 prose prose-sm prose-invert max-w-none prose-p:my-1 prose-pre:bg-zinc-800 prose-code:text-emerald-400">
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{oracle.response}</ReactMarkdown>
+                              </div>
+                            </div>
                           </div>
                         </details>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Dispatch badges (collapsible, live-tracked) */}
+                  {msg.dispatches && msg.dispatches.length > 0 && (
+                    <div className="mb-2 space-y-1">
+                      {msg.dispatches.map((d) => (
+                        <DispatchBadge key={d.runId} dispatch={d} />
                       ))}
                     </div>
                   )}
@@ -409,4 +459,173 @@ Bonfire architecture now uses 4 stages
       </div>
     </div>
   )
+}
+
+const TERMINAL_RUN_STATUSES = new Set(['success', 'failure', 'cancelled', 'no_changes'])
+
+function DispatchBadge({ dispatch }: { dispatch: DispatchInfo }) {
+  const [run, setRun] = useState<DeveloperRun | null>(null)
+  const [now, setNow] = useState<number>(() => Date.now())
+
+  // Poll the run until it reaches a terminal status; re-poll on mount so
+  // reloading the chat also shows the up-to-date state for historical runs.
+  useEffect(() => {
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const tick = async () => {
+      try {
+        const r = await developersApi.getRun(dispatch.developerId, dispatch.runId)
+        if (cancelled) return
+        setRun(r)
+        if (!TERMINAL_RUN_STATUSES.has(r.status)) {
+          timer = setTimeout(tick, 1500)
+        }
+      } catch {
+        if (!cancelled) timer = setTimeout(tick, 3000)
+      }
+    }
+    tick()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [dispatch.developerId, dispatch.runId])
+
+  // Wall-clock tick for live timer while running.
+  useEffect(() => {
+    if (run && TERMINAL_RUN_STATUSES.has(run.status)) return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [run])
+
+  const status = run?.status ?? (dispatch.queued ? 'pending' : 'running')
+  const isTerminal = TERMINAL_RUN_STATUSES.has(status)
+  const startedAt = run?.startedAt ? new Date(run.startedAt).getTime() : null
+  const finishedAt = run?.finishedAt ? new Date(run.finishedAt).getTime() : null
+  const elapsed = startedAt ? ((finishedAt ?? now) - startedAt) : null
+
+  const statusColor: Record<string, string> = {
+    pending: 'text-zinc-400',
+    running: 'text-yellow-400',
+    success: 'text-green-400',
+    failure: 'text-red-400',
+    cancelled: 'text-zinc-400',
+    no_changes: 'text-blue-400',
+  }
+
+  const trailer = (run?.trailer || {}) as Record<string, unknown>
+  const pickStr = (k: string) => (typeof trailer[k] === 'string' ? (trailer[k] as string) : undefined)
+  const pickNum = (k: string) => (typeof trailer[k] === 'number' ? (trailer[k] as number) : undefined)
+
+  return (
+    <details className="bg-zinc-900 border border-zinc-800 rounded text-xs">
+      <summary className="px-3 py-1.5 cursor-pointer text-zinc-400 hover:text-zinc-200 flex items-center gap-2 flex-wrap">
+        <span>Dispatch:</span>
+        <span className="font-medium text-indigo-400">{dispatch.developer}</span>
+        <span className="px-1 py-0.5 rounded bg-zinc-800 text-zinc-400 font-mono">{dispatch.mode}</span>
+        <span className={`font-medium ${statusColor[status] || 'text-zinc-400'}`}>{status}</span>
+        {run?.model && <span className="text-zinc-500 font-mono">{run.model}</span>}
+        {elapsed !== null && (
+          <span className="text-zinc-500 font-mono">{formatElapsed(elapsed)}</span>
+        )}
+        {typeof run?.totalCostUsd === 'number' && (
+          <span className="text-zinc-500 font-mono">${run.totalCostUsd.toFixed(4)}</span>
+        )}
+        <a
+          href={`/developers/${dispatch.developerId}`}
+          className="text-zinc-500 hover:text-zinc-300 underline-offset-2 hover:underline ml-auto"
+          onClick={(e) => e.stopPropagation()}
+        >
+          view
+        </a>
+      </summary>
+      <div className="border-t border-zinc-800 divide-y divide-zinc-800 max-h-[32rem] overflow-y-auto">
+        {/* Data in: instructions + mode + developer */}
+        <div className="px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">
+            Dispatched to <span className="text-indigo-400">{dispatch.developer}</span> · mode <span className="text-zinc-300 font-mono">{dispatch.mode}</span>
+            {run?.provider && <> · provider <span className="text-zinc-300 font-mono">{run.provider}</span></>}
+            {run?.model && <> · model <span className="text-zinc-300 font-mono">{run.model}</span></>}
+          </div>
+          <div className="text-zinc-300 prose prose-sm prose-invert max-w-none prose-p:my-1 prose-pre:bg-zinc-800 prose-code:text-emerald-400">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{dispatch.instructions}</ReactMarkdown>
+          </div>
+        </div>
+
+        {/* Data out: current status / final report / trailer */}
+        <div className="px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">
+            {isTerminal ? 'Result' : 'Current status'}
+          </div>
+          {run?.response ? (
+            <div className="text-zinc-300 prose prose-sm prose-invert max-w-none prose-p:my-1 prose-pre:bg-zinc-800 prose-code:text-emerald-400">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{run.response}</ReactMarkdown>
+            </div>
+          ) : run?.errorMessage ? (
+            <pre className="text-red-400 whitespace-pre-wrap break-words font-mono">{run.errorMessage}</pre>
+          ) : (
+            <p className="text-zinc-500">
+              {status === 'pending' ? 'Waiting for an idle developer…' : 'Running…'}
+            </p>
+          )}
+
+          {isTerminal && run && (
+            <div className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px] font-mono text-zinc-400">
+              {typeof run.totalCostUsd === 'number' && (
+                <><span className="text-zinc-500">cost</span><span>${run.totalCostUsd.toFixed(4)}</span></>
+              )}
+              {typeof run.durationMs === 'number' && (
+                <><span className="text-zinc-500">duration</span><span>{formatElapsed(run.durationMs)}</span></>
+              )}
+              {typeof run.durationApiMs === 'number' && (
+                <><span className="text-zinc-500">duration_api</span><span>{formatElapsed(run.durationApiMs)}</span></>
+              )}
+              {run.stopReason && (
+                <><span className="text-zinc-500">stop_reason</span><span>{run.stopReason}</span></>
+              )}
+              {run.sessionId && (
+                <><span className="text-zinc-500">session_id</span><span className="truncate">{run.sessionId}</span></>
+              )}
+              {pickStr('terminal_reason') && (
+                <><span className="text-zinc-500">terminal_reason</span><span>{pickStr('terminal_reason')}</span></>
+              )}
+              {pickNum('num_turns') !== undefined && (
+                <><span className="text-zinc-500">num_turns</span><span>{pickNum('num_turns')}</span></>
+              )}
+              {trailer.fast_mode_state !== undefined && (
+                <><span className="text-zinc-500">fast_mode_state</span><span>{JSON.stringify(trailer.fast_mode_state)}</span></>
+              )}
+              {trailer.api_error_status !== undefined && (
+                <><span className="text-zinc-500">api_error_status</span><span>{JSON.stringify(trailer.api_error_status)}</span></>
+              )}
+              {trailer.permission_denials !== undefined && (
+                <><span className="text-zinc-500">permission_denials</span><span>{JSON.stringify(trailer.permission_denials)}</span></>
+              )}
+            </div>
+          )}
+
+          {isTerminal && run?.trailer && (
+            <details className="mt-2">
+              <summary className="text-[10px] text-zinc-500 cursor-pointer hover:text-zinc-300">
+                Full trailer
+              </summary>
+              <pre className="mt-1 text-[11px] text-zinc-500 whitespace-pre-wrap break-words font-mono">
+                {JSON.stringify(run.trailer, null, 2)}
+              </pre>
+            </details>
+          )}
+        </div>
+      </div>
+    </details>
+  )
+}
+
+function formatElapsed(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '—'
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  const s = Math.floor(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  const rem = s % 60
+  return `${m}m ${rem}s`
 }

@@ -189,6 +189,14 @@ export interface DbDeveloperRun {
   started_at: Date | null
   finished_at: Date | null
   error_message: string | null
+  provider: string | null
+  model: string | null
+  session_id: string | null
+  total_cost_usd: number | null
+  duration_ms: number | null
+  duration_api_ms: number | null
+  stop_reason: string | null
+  trailer: Record<string, unknown> | string | null
   created_at: Date
   updated_at: Date
 }

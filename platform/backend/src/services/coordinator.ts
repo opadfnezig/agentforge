@@ -18,7 +18,15 @@ export interface ChatMessage {
 export type CoordinatorEvent =
   | { type: 'status'; message: string }
   | { type: 'oracle'; domain: string; question: string; response: string }
-  | { type: 'dispatch'; developer: string; mode: RunMode; runId: string; instructions: string }
+  | {
+      type: 'dispatch'
+      developer: string
+      developerId: string
+      mode: RunMode
+      runId: string
+      instructions: string
+      queued: boolean
+    }
   | { type: 'text'; text: string }
   | { type: 'done' }
 
@@ -118,11 +126,12 @@ Modes:
 - clarify: developer reads the code and asks clarifying questions, never commits (use when instructions would be ambiguous)
 
 Rules:
-- You can query multiple oracles and dispatch to developers in the same turn. Output ALL commands you need, then stop.
+- You can query multiple oracles and dispatch to developers in the same turn. Output ALL commands you need, then stop. Do NOT write any prose before or after the commands — let the synthesis pass produce the user-facing response.
+- CRITICAL: If you intend to dispatch, you MUST use the [dispatch, ...][end] syntax. Describing a dispatch in prose ("I will dispatch X to do Y") does NOT actually dispatch anything. The command syntax is the only way to trigger real work.
 - Dispatches are fire-and-report — they return a runId the user can track. Don't wait for completion in your response.
 - Prefer 'clarify' mode when the request is high-level or ambiguous. Prefer 'implement' when the user has been specific or confirmed the approach.
-- If the question is purely conversational and needs no oracle data or dispatch, respond directly.
-- Never assume. If something is unclear, ask the user — do not dispatch blindly.
+- If the question is purely conversational AND needs no oracle data or dispatch, respond directly in plain prose (no fake command formatting).
+- Never assume. If the request is ambiguous, ask the user a clarifying question directly — do not dispatch blindly.
 - NEVER tell the user you can't access oracles/developers — you can, every turn.
 - Only dispatch to online developers.`
 
@@ -327,6 +336,13 @@ export const run = async (
   const queries = parseQueryCommands(firstPassOutput)
   const dispatches = parseDispatchCommands(firstPassOutput)
 
+  // Log every first-pass for debugging command parsing
+  logger.info({
+    queriesFound: queries.length,
+    dispatchesFound: dispatches.length,
+    outputPreview: firstPassOutput.slice(0, 800),
+  }, 'Coordinator first pass decision')
+
   // No commands — direct answer
   if (queries.length === 0 && dispatches.length === 0) {
     logger.info('Coordinator answered directly')
@@ -375,17 +391,28 @@ export const run = async (
         if (!dev) {
           return { developer: d.developer, mode: d.mode, runId: null, instructions: d.instructions, error: `Developer "${d.developer}" not found` }
         }
-        if (!developerRegistry.isOnline(dev.id)) {
-          return { developer: d.developer, mode: d.mode, runId: null, instructions: d.instructions, error: `Developer "${d.developer}" is offline` }
-        }
         try {
-          // Fire-and-report: create run, dispatch over WS, don't await completion
+          // Create the run. Queue it if developer isn't idle/online — the registry
+          // will drain pending runs when the developer reconnects or finishes.
           const run = await developerQueries.createRun(dev.id, d.instructions, d.mode)
-          // Kick off dispatch without awaiting — developer will stream back, run status polled via /developers/:id/runs
-          developerRegistry.dispatch(dev.id, run.id, d.instructions, d.mode).catch((err) => {
-            logger.error({ err, runId: run.id }, 'Dispatch failed async')
+          const online = developerRegistry.isOnline(dev.id)
+          const idle = online && dev.status === 'idle'
+          if (idle) {
+            developerRegistry.dispatch(dev.id, run.id, d.instructions, d.mode).catch((err) => {
+              logger.error({ err, runId: run.id }, 'Dispatch failed async')
+            })
+          } else {
+            logger.info({ runId: run.id, developer: d.developer, online, status: dev.status }, 'Dispatch queued')
+          }
+          emit({
+            type: 'dispatch',
+            developer: d.developer,
+            developerId: dev.id,
+            mode: d.mode,
+            runId: run.id,
+            instructions: d.instructions,
+            queued: !idle,
           })
-          emit({ type: 'dispatch', developer: d.developer, mode: d.mode, runId: run.id, instructions: d.instructions })
           return { developer: d.developer, mode: d.mode, runId: run.id, instructions: d.instructions, error: null }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)

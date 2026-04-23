@@ -158,7 +158,9 @@ developersRouter.get('/:id/secret', async (req, res, next) => {
   }
 })
 
-// Dispatch a run (fire-and-forget; returns runId immediately)
+// Dispatch a run (fire-and-forget; returns runId immediately).
+// If the developer is offline or busy the run is persisted as 'pending' and
+// assigned when the developer becomes idle — the request always succeeds.
 developersRouter.post('/:id/dispatch', async (req, res, next) => {
   try {
     const { instructions, mode } = dispatchSchema.parse(req.body)
@@ -166,26 +168,47 @@ developersRouter.post('/:id/dispatch', async (req, res, next) => {
     if (!developer) {
       throw new AppError(404, 'Developer not found', 'DEVELOPER_NOT_FOUND')
     }
-    if (!developerRegistry.isOnline(developer.id)) {
-      throw new AppError(409, 'Developer is not online', 'DEVELOPER_OFFLINE')
-    }
 
     const finalMode = mode || 'implement'
     const run = await developerQueries.createRun(developer.id, instructions, finalMode)
 
-    // Dispatch in background; resolution handled via registry events
-    developerRegistry
-      .dispatch(developer.id, run.id, instructions, finalMode)
-      .catch(async (err) => {
-        logger.error({ err, runId: run.id }, 'Dispatch failed')
-        await developerQueries.updateRun(run.id, {
-          status: 'failure',
-          errorMessage: err instanceof Error ? err.message : String(err),
-          finishedAt: new Date(),
-        })
-      })
+    const online = developerRegistry.isOnline(developer.id)
+    const idle = online && developer.status === 'idle'
 
-    res.status(202).json({ runId: run.id, status: run.status, mode: run.mode })
+    if (idle) {
+      // Immediate dispatch; resolution handled via registry events
+      developerRegistry
+        .dispatch(developer.id, run.id, instructions, finalMode)
+        .catch(async (err) => {
+          logger.error({ err, runId: run.id }, 'Dispatch failed')
+          await developerQueries.updateRun(run.id, {
+            status: 'failure',
+            errorMessage: err instanceof Error ? err.message : String(err),
+            finishedAt: new Date(),
+          })
+        })
+    } else {
+      logger.info(
+        { developerId: developer.id, runId: run.id, online, status: developer.status },
+        'Dispatch queued (developer not idle)'
+      )
+    }
+
+    res.status(202).json({ runId: run.id, status: run.status, mode: run.mode, queued: !idle })
+  } catch (error) {
+    next(error)
+  }
+})
+
+// List pending (queued) runs for a developer — queue inspection.
+developersRouter.get('/:id/queue', async (req, res, next) => {
+  try {
+    const developer = await developerQueries.getDeveloper(req.params.id)
+    if (!developer) {
+      throw new AppError(404, 'Developer not found', 'DEVELOPER_NOT_FOUND')
+    }
+    const pending = await developerQueries.listPendingRuns(developer.id)
+    res.json(pending)
   } catch (error) {
     next(error)
   }

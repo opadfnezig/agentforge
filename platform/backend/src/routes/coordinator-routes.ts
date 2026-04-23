@@ -136,8 +136,10 @@ coordinatorRouter.post('/chats/:id/message', async (req, res, next) => {
     const priorMessages = await chatDb.getMessages(chat.id)
     const history = priorMessages.map((m) => ({
       role: m.role,
-      // Strip persisted oracle sentinel so it doesn't leak into the next prompt
-      content: m.content.replace(/\n\n<!--ORACLES:[\s\S]*?:ORACLES-->\s*$/, ''),
+      // Strip persisted oracle/dispatch sentinels so they don't leak into the next prompt
+      content: m.content
+        .replace(/\n*<!--ORACLES:[\s\S]*?:ORACLES-->\s*/g, '')
+        .replace(/\n*<!--DISPATCHES:[\s\S]*?:DISPATCHES-->\s*/g, ''),
     }))
 
     await chatDb.addMessage(chat.id, 'user', message)
@@ -150,19 +152,39 @@ coordinatorRouter.post('/chats/:id/message', async (req, res, next) => {
     res.setHeader('Connection', 'keep-alive')
 
     const collectedOracles: { domain: string; question: string; response: string }[] = []
+    const collectedDispatches: {
+      developer: string
+      developerId: string
+      mode: string
+      runId: string
+      instructions: string
+      queued: boolean
+    }[] = []
 
     const fullText = await run(message, history, (event) => {
       if (event.type === 'oracle') {
         collectedOracles.push({ domain: event.domain, question: event.question, response: event.response })
+      } else if (event.type === 'dispatch') {
+        collectedDispatches.push({
+          developer: event.developer,
+          developerId: event.developerId,
+          mode: event.mode,
+          runId: event.runId,
+          instructions: event.instructions,
+          queued: event.queued,
+        })
       }
       sendSSE(res, event)
     })
 
-    // Persist — append oracle data as JSON sentinel so citations expand on reload
+    // Persist — append oracle/dispatch data as JSON sentinels so badges expand on reload
     if (fullText) {
       let stored = fullText
       if (collectedOracles.length > 0) {
         stored += `\n\n<!--ORACLES:${JSON.stringify(collectedOracles)}:ORACLES-->`
+      }
+      if (collectedDispatches.length > 0) {
+        stored += `\n\n<!--DISPATCHES:${JSON.stringify(collectedDispatches)}:DISPATCHES-->`
       }
       await chatDb.addMessage(chat.id, 'assistant', stored)
       await chatDb.touchChat(chat.id)

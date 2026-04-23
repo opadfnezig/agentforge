@@ -37,6 +37,17 @@ const toDeveloper = (row: DbDeveloper): Developer => ({
   updatedAt: row.updated_at,
 })
 
+const parseNullableJson = (
+  v: Record<string, unknown> | string | null | undefined
+): Record<string, unknown> | null => {
+  if (v === null || v === undefined) return null
+  if (typeof v === 'string') {
+    if (!v) return null
+    try { return JSON.parse(v) } catch { return null }
+  }
+  return v
+}
+
 const toRun = (row: DbDeveloperRun): DeveloperRun => ({
   id: row.id,
   developerId: row.developer_id,
@@ -49,6 +60,14 @@ const toRun = (row: DbDeveloperRun): DeveloperRun => ({
   startedAt: row.started_at,
   finishedAt: row.finished_at,
   errorMessage: row.error_message,
+  provider: row.provider ?? null,
+  model: row.model ?? null,
+  sessionId: row.session_id ?? null,
+  totalCostUsd: row.total_cost_usd ?? null,
+  durationMs: row.duration_ms ?? null,
+  durationApiMs: row.duration_api_ms ?? null,
+  stopReason: row.stop_reason ?? null,
+  trailer: parseNullableJson(row.trailer),
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 })
@@ -163,6 +182,14 @@ export interface UpdateRunInput {
   startedAt?: Date | null
   finishedAt?: Date | null
   errorMessage?: string | null
+  provider?: string | null
+  model?: string | null
+  sessionId?: string | null
+  totalCostUsd?: number | null
+  durationMs?: number | null
+  durationApiMs?: number | null
+  stopReason?: string | null
+  trailer?: Record<string, unknown> | null
 }
 
 export const updateRun = async (id: string, data: UpdateRunInput): Promise<DeveloperRun | null> => {
@@ -174,12 +201,41 @@ export const updateRun = async (id: string, data: UpdateRunInput): Promise<Devel
   if (data.startedAt !== undefined) updateData.started_at = data.startedAt
   if (data.finishedAt !== undefined) updateData.finished_at = data.finishedAt
   if (data.errorMessage !== undefined) updateData.error_message = data.errorMessage
+  if (data.provider !== undefined) updateData.provider = data.provider
+  if (data.model !== undefined) updateData.model = data.model
+  if (data.sessionId !== undefined) updateData.session_id = data.sessionId
+  if (data.totalCostUsd !== undefined) updateData.total_cost_usd = data.totalCostUsd
+  if (data.durationMs !== undefined) updateData.duration_ms = data.durationMs
+  if (data.durationApiMs !== undefined) updateData.duration_api_ms = data.durationApiMs
+  if (data.stopReason !== undefined) updateData.stop_reason = data.stopReason
+  if (data.trailer !== undefined) {
+    updateData.trailer = (data.trailer === null ? null : JSON.stringify(data.trailer)) as any
+  }
 
   const [row] = await db<DbDeveloperRun>('developer_runs')
     .where({ id })
     .update({ ...updateData, updated_at: new Date() })
     .returning('*')
   return row ? toRun(row) : null
+}
+
+// Pick the oldest pending run for a developer (FIFO queue).
+export const getNextPendingRun = async (
+  developerId: string
+): Promise<DeveloperRun | null> => {
+  const row = await db<DbDeveloperRun>('developer_runs')
+    .where({ developer_id: developerId, status: 'pending' })
+    .orderBy('created_at', 'asc')
+    .first()
+  return row ? toRun(row) : null
+}
+
+// List all pending runs for a developer (queue inspection).
+export const listPendingRuns = async (developerId: string): Promise<DeveloperRun[]> => {
+  const rows = await db<DbDeveloperRun>('developer_runs')
+    .where({ developer_id: developerId, status: 'pending' })
+    .orderBy('created_at', 'asc')
+  return rows.map(toRun)
 }
 
 // --- Log CRUD ---

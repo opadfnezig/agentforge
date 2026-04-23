@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams } from 'next/navigation'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { Button } from '@/components/ui/button'
 import { developersApi, type Developer, type DeveloperRun, type DeveloperLog } from '@/lib/api'
 
@@ -226,10 +228,10 @@ export default function DeveloperDetailPage() {
             ) : (
               <div className="space-y-2">
                 {runs.map(run => (
-                  <button
+                  <div
                     key={run.id}
                     onClick={() => viewRun(run.id)}
-                    className={`w-full text-left rounded border p-3 transition-colors ${
+                    className={`w-full text-left rounded border p-3 transition-colors cursor-pointer ${
                       activeRunId === run.id
                         ? 'border-zinc-500 bg-zinc-900'
                         : 'border-zinc-800 bg-zinc-900/30 hover:border-zinc-600'
@@ -241,18 +243,28 @@ export default function DeveloperDetailPage() {
                         <span className="px-1.5 py-0.5 text-xs rounded bg-zinc-800 text-zinc-400">
                           {run.mode}
                         </span>
+                        {run.model && (
+                          <span className="px-1.5 py-0.5 text-xs rounded bg-zinc-800 text-zinc-500 font-mono">
+                            {run.model}
+                          </span>
+                        )}
                       </div>
                       <span className="text-xs text-zinc-500">
                         {formatDuration(run.startedAt, run.finishedAt, now)}
                       </span>
                     </div>
-                    <p className="text-sm text-zinc-300 truncate">{run.instructions}</p>
+                    <div className="text-sm text-zinc-300 prose prose-sm prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 prose-pre:bg-zinc-800 prose-pre:border prose-pre:border-zinc-700 prose-code:text-emerald-400 prose-strong:text-zinc-100">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{run.instructions}</ReactMarkdown>
+                    </div>
                     <div className="flex items-center gap-2 mt-1 text-xs text-zinc-500 font-mono">
                       {run.gitShaStart && <span>{run.gitShaStart.slice(0, 7)}</span>}
                       {run.gitShaStart && run.gitShaEnd && <span>→</span>}
                       {run.gitShaEnd && <span>{run.gitShaEnd.slice(0, 7)}</span>}
+                      {typeof run.totalCostUsd === 'number' && (
+                        <span className="ml-auto">${run.totalCostUsd.toFixed(4)}</span>
+                      )}
                     </div>
-                  </button>
+                  </div>
                 ))}
               </div>
             )}
@@ -611,11 +623,23 @@ function RunSummary({ run, developer }: { run: DeveloperRun; developer: Develope
     : null
   return (
     <div className="mt-4 p-3 rounded border border-zinc-700 bg-zinc-900">
-      <div className="flex items-center gap-2 mb-2">
+      <div className="flex items-center gap-2 mb-2 flex-wrap">
         <RunStatusBadge status={run.status} />
         <span className="text-xs text-zinc-500">
           {formatDuration(run.startedAt, run.finishedAt)}
         </span>
+        {run.provider && (
+          <span className="text-xs font-mono text-zinc-500">{run.provider}</span>
+        )}
+        {run.model && (
+          <span className="text-xs font-mono text-zinc-500">{run.model}</span>
+        )}
+        {typeof run.totalCostUsd === 'number' && (
+          <span className="text-xs font-mono text-zinc-500">${run.totalCostUsd.toFixed(4)}</span>
+        )}
+        {run.stopReason && (
+          <span className="text-xs font-mono text-zinc-500">stop={run.stopReason}</span>
+        )}
       </div>
       {run.response && (
         <pre className="text-sm text-zinc-300 whitespace-pre-wrap font-mono mb-2">
@@ -628,7 +652,7 @@ function RunSummary({ run, developer }: { run: DeveloperRun; developer: Develope
         </pre>
       )}
       {(run.gitShaStart || run.gitShaEnd) && (
-        <div className="flex items-center gap-2 text-xs font-mono text-zinc-500">
+        <div className="flex items-center gap-2 text-xs font-mono text-zinc-500 mb-2">
           {run.gitShaStart && <span>{run.gitShaStart.slice(0, 7)}</span>}
           {run.gitShaStart && run.gitShaEnd && <span>→</span>}
           {run.gitShaEnd && <span>{run.gitShaEnd.slice(0, 7)}</span>}
@@ -638,6 +662,16 @@ function RunSummary({ run, developer }: { run: DeveloperRun; developer: Develope
             </a>
           )}
         </div>
+      )}
+      {run.trailer && (
+        <details>
+          <summary className="text-[10px] text-zinc-500 cursor-pointer hover:text-zinc-300">
+            Full trailer
+          </summary>
+          <pre className="mt-1 text-[11px] text-zinc-500 whitespace-pre-wrap break-words font-mono">
+            {JSON.stringify(run.trailer, null, 2)}
+          </pre>
+        </details>
       )}
     </div>
   )
