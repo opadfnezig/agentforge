@@ -275,6 +275,89 @@ developersRouter.post('/:id/runs/:runId/cancel', async (req, res, next) => {
   }
 })
 
+// Re-dispatch a failed run with the same instructions but no carry-over
+// context. Inserts as 'queued' (deliberate user action — skip pending
+// approval), links via parent_run_id. 409 if a child is already in-flight.
+const dispatchRetryOrContinue = async (
+  req: Request,
+  res: Response,
+  next: (err: unknown) => void,
+  withResumeContext: boolean
+): Promise<void> => {
+  try {
+    const source = await developerQueries.getRun(req.params.runId)
+    if (!source || source.developerId !== req.params.id) {
+      throw new AppError(404, 'Run not found', 'RUN_NOT_FOUND')
+    }
+    if (source.status !== 'failure') {
+      throw new AppError(
+        400,
+        `Run is ${source.status}, only failed runs can be retried`,
+        'RUN_NOT_FAILED'
+      )
+    }
+    const activeChild = await developerQueries.findActiveChildRun(source.id)
+    if (activeChild) {
+      throw new AppError(
+        409,
+        `A retry is already ${activeChild.status} (run ${activeChild.id})`,
+        'RETRY_ALREADY_IN_FLIGHT'
+      )
+    }
+
+    let resumeContext: string | null = null
+    if (withResumeContext) {
+      const lastAssistant = await developerQueries.getLastAssistantText(source.id)
+      const lines = [
+        'Previous run failed.',
+        `stop_reason: ${source.stopReason || 'unknown'}`,
+        `error: ${source.errorMessage || 'none captured'}`,
+        'last assistant message:',
+        lastAssistant && lastAssistant.length > 0 ? lastAssistant : 'none captured',
+      ]
+      resumeContext = lines.join('\n')
+    }
+
+    const child = await developerQueries.createRun(
+      source.developerId,
+      source.instructions,
+      source.mode,
+      'queued',
+      { resumeContext, parentRunId: source.id }
+    )
+
+    logger.info(
+      {
+        developerId: source.developerId,
+        sourceRunId: source.id,
+        childRunId: child.id,
+        kind: withResumeContext ? 'continue' : 'retry',
+      },
+      'Run retry/continue created'
+    )
+
+    // Drain immediately if developer is idle; otherwise the existing queue
+    // picker will handle it on the next idle window.
+    developerRegistry.assignNextQueued(source.developerId).catch((err) => {
+      logger.error(
+        { err, developerId: source.developerId },
+        'Queue drain after retry/continue failed'
+      )
+    })
+
+    res.status(202).json(child)
+  } catch (error) {
+    next(error)
+  }
+}
+
+developersRouter.post('/:id/runs/:runId/retry', (req, res, next) =>
+  dispatchRetryOrContinue(req, res, next, false)
+)
+developersRouter.post('/:id/runs/:runId/continue', (req, res, next) =>
+  dispatchRetryOrContinue(req, res, next, true)
+)
+
 // Edit a pending run's instructions (pre-approval tweak). Only allowed while
 // status === 'pending' — once queued or running, instructions are immutable.
 developersRouter.patch('/:id/runs/:runId', async (req, res, next) => {

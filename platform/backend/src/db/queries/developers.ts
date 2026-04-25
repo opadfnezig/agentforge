@@ -70,6 +70,8 @@ const toRun = (row: DbDeveloperRun): DeveloperRun => ({
   trailer: parseNullableJson(row.trailer),
   pushStatus: (row.push_status as 'pushed' | 'failed' | 'not_attempted' | null) ?? null,
   pushError: row.push_error ?? null,
+  resumeContext: row.resume_context ?? null,
+  parentRunId: row.parent_run_id ?? null,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 })
@@ -151,7 +153,8 @@ export const createRun = async (
   developerId: string,
   instructions: string,
   mode: RunMode = 'implement',
-  initialStatus: RunStatus = 'queued'
+  initialStatus: RunStatus = 'queued',
+  extras: { resumeContext?: string | null; parentRunId?: string | null } = {}
 ): Promise<DeveloperRun> => {
   const [row] = await db<DbDeveloperRun>('developer_runs')
     .insert({
@@ -160,9 +163,48 @@ export const createRun = async (
       mode,
       instructions,
       status: initialStatus,
+      resume_context: extras.resumeContext ?? null,
+      parent_run_id: extras.parentRunId ?? null,
     })
     .returning('*')
   return toRun(row)
+}
+
+// Find an in-flight (or about-to-be) child of a given parent run. Used by
+// retry/continue to reject duplicate clicks while a previous retry is still
+// pending/queued/running.
+export const findActiveChildRun = async (
+  parentRunId: string
+): Promise<DeveloperRun | null> => {
+  const row = await db<DbDeveloperRun>('developer_runs')
+    .where({ parent_run_id: parentRunId })
+    .whereIn('status', ['pending', 'queued', 'running'])
+    .orderBy('created_at', 'asc')
+    .first()
+  return row ? toRun(row) : null
+}
+
+// Pull the text of the last `assistant` event recorded for a run, joining
+// any text parts (tool_use blocks excluded). Returns null if no assistant
+// event with text content was ever logged. Used by /continue to stitch
+// failure context for the next attempt.
+export const getLastAssistantText = async (runId: string): Promise<string | null> => {
+  const row = await db<DbDeveloperLog>('developer_logs')
+    .where({ run_id: runId, event_type: 'assistant' })
+    .orderBy('timestamp', 'desc')
+    .first()
+  if (!row) return null
+  const data = parseJson(row.data) as {
+    message?: { content?: Array<{ type?: string; text?: string }> }
+  }
+  const content = data?.message?.content
+  if (!Array.isArray(content)) return null
+  const text = content
+    .filter((c) => c && c.type === 'text' && typeof c.text === 'string')
+    .map((c) => c.text as string)
+    .join('\n')
+    .trim()
+  return text.length > 0 ? text : null
 }
 
 export const updateRunInstructions = async (

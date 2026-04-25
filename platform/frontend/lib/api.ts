@@ -34,7 +34,13 @@ async function fetchAPI<T>(endpoint: string, options: FetchOptions = {}): Promis
 
   if (!res.ok) {
     const error = await res.json().catch(() => ({ error: { message: 'Request failed' } }))
-    throw new Error(error.error?.message || `HTTP ${res.status}`)
+    const err = new Error(error.error?.message || `HTTP ${res.status}`) as Error & {
+      status?: number
+      code?: string
+    }
+    err.status = res.status
+    err.code = error.error?.code
+    throw err
   }
 
   if (res.status === 204) {
@@ -445,6 +451,8 @@ export interface DeveloperRun {
   trailer: Record<string, unknown> | null
   pushStatus: 'pushed' | 'failed' | 'not_attempted' | null
   pushError: string | null
+  resumeContext: string | null
+  parentRunId: string | null
   createdAt: string
 }
 
@@ -470,6 +478,10 @@ export const developersApi = {
     fetchAPI<DeveloperRun>(`/developers/${id}/runs/${runId}/approve`, {method: 'POST'}),
   cancelRun: (id: string, runId: string) =>
     fetchAPI<DeveloperRun>(`/developers/${id}/runs/${runId}/cancel`, {method: 'POST'}),
+  retryRun: (id: string, runId: string) =>
+    fetchAPI<DeveloperRun>(`/developers/${id}/runs/${runId}/retry`, {method: 'POST'}),
+  continueRun: (id: string, runId: string) =>
+    fetchAPI<DeveloperRun>(`/developers/${id}/runs/${runId}/continue`, {method: 'POST'}),
   editRunInstructions: (id: string, runId: string, instructions: string) =>
     fetchAPI<DeveloperRun>(`/developers/${id}/runs/${runId}`, {method: 'PATCH', body: JSON.stringify({instructions})}),
   listRuns: (id: string) => fetchAPI<DeveloperRun[]>(`/developers/${id}/runs`),

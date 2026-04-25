@@ -45,6 +45,9 @@ export interface DispatchMessage {
   runId: string
   instructions: string
   mode: RunMode
+  // Stitched failure context from a prior attempt (set by /continue). The
+  // worker prepends this to the rendered prompt before instructions.
+  resumeContext?: string | null
 }
 
 /**
@@ -101,7 +104,7 @@ class DeveloperRegistry {
 
     logger.info({ developerId, runId: next.id }, 'Assigning queued run')
     // Fire-and-forget; dispatch waits internally for completion.
-    this.dispatch(developerId, next.id, next.instructions, next.mode).catch(async (err) => {
+    this.dispatch(developerId, next.id, next.instructions, next.mode, next.resumeContext).catch(async (err) => {
       logger.error({ err, runId: next.id }, 'Queued dispatch failed')
       await developerQueries.updateRun(next.id, {
         status: 'failure',
@@ -139,7 +142,8 @@ class DeveloperRegistry {
     developerId: string,
     runId: string,
     instructions: string,
-    mode: RunMode
+    mode: RunMode,
+    resumeContext?: string | null
   ): Promise<void> {
     const ws = this.sockets.get(developerId)
     if (!ws || ws.readyState !== 1) {
@@ -147,6 +151,7 @@ class DeveloperRegistry {
     }
 
     const message: DispatchMessage = { type: 'dispatch', runId, instructions, mode }
+    if (resumeContext) message.resumeContext = resumeContext
     ws.send(JSON.stringify(message))
     logger.info({ developerId, runId, mode }, 'Dispatched run')
 

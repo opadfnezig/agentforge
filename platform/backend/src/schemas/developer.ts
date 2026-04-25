@@ -68,6 +68,8 @@ export const developerRunSchema = z.object({
   trailer: z.record(z.unknown()).nullable(),
   pushStatus: z.enum(['pushed', 'failed', 'not_attempted']).nullable(),
   pushError: z.string().nullable(),
+  resumeContext: z.string().nullable(),
+  parentRunId: z.string().uuid().nullable(),
   createdAt: z.date(),
   updatedAt: z.date(),
 })

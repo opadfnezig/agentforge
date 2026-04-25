@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback, memo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Button } from '@/components/ui/button'
+import { useToast } from '@/components/ui/toaster'
 import { developersApi, type DeveloperRun } from '@/lib/api'
 
 interface Chat {
@@ -652,12 +653,14 @@ const ReadBlock = memo(function ReadBlock({ read }: { read: ReadInfo }) {
 const TERMINAL_RUN_STATUSES = new Set(['success', 'failure', 'cancelled', 'no_changes'])
 
 const DispatchBadge = memo(function DispatchBadge({ dispatch }: { dispatch: DispatchInfo }) {
+  const { toast } = useToast()
   const [run, setRun] = useState<DeveloperRun | null>(null)
   const [now, setNow] = useState<number>(() => Date.now())
   const [editing, setEditing] = useState(false)
   const [editText, setEditText] = useState(dispatch.instructions)
-  const [actionBusy, setActionBusy] = useState<null | 'approve' | 'cancel' | 'edit'>(null)
+  const [actionBusy, setActionBusy] = useState<null | 'approve' | 'cancel' | 'edit' | 'retry' | 'continue'>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [liveChildExists, setLiveChildExists] = useState(false)
 
   // Poll the run until it reaches a terminal status; re-poll on mount so
   // reloading the chat also shows the up-to-date state for historical runs.
@@ -741,6 +744,28 @@ const DispatchBadge = memo(function DispatchBadge({ dispatch }: { dispatch: Disp
     }
   }
 
+  const retryOrContinue = async (kind: 'retry' | 'continue') => {
+    setActionBusy(kind)
+    setActionError(null)
+    try {
+      const apiCall = kind === 'retry' ? developersApi.retryRun : developersApi.continueRun
+      const child = await apiCall(dispatch.developerId, dispatch.runId)
+      const shortId = child.id.length >= 8 ? child.id.slice(0, 8) : child.id
+      toast({
+        title: kind === 'retry' ? 'Retry queued' : 'Continue queued',
+        description: shortId,
+      })
+    } catch (err) {
+      const e = err as Error & { status?: number }
+      if (e.status === 409) {
+        setLiveChildExists(true)
+      }
+      setActionError(e.message || `${kind} failed`)
+    } finally {
+      setActionBusy(null)
+    }
+  }
+
   const saveEdit = async () => {
     const next = editText.trim()
     if (!next) return
@@ -770,6 +795,14 @@ const DispatchBadge = memo(function DispatchBadge({ dispatch }: { dispatch: Disp
         <span className="px-1 py-0.5 rounded bg-zinc-800 text-zinc-400 font-mono">{dispatch.mode}</span>
         <span className={`font-medium ${statusColor[status] || 'text-zinc-400'}`}>{status}</span>
         <RunIdChip runId={dispatch.runId} />
+        {run?.parentRunId && (
+          <span
+            className="text-zinc-500 font-mono text-[10px]"
+            title={`parent runId: ${run.parentRunId}`}
+          >
+            retry of {run.parentRunId.slice(0, 8)}
+          </span>
+        )}
 
         {run?.pushStatus && run.pushStatus !== 'not_attempted' && (
           <PushStatusBadge pushStatus={run.pushStatus} pushError={run.pushError} />
@@ -823,6 +856,43 @@ const DispatchBadge = memo(function DispatchBadge({ dispatch }: { dispatch: Disp
                 className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {editing ? 'Discard edit' : 'Edit'}
+              </button>
+              {actionError && <span className="text-red-400 text-[11px]">{actionError}</span>}
+            </div>
+          </div>
+        )}
+
+        {/* Recovery controls (failed runs only). Retry restarts clean;
+            Continue carries stitched failure context into the new attempt. */}
+        {status === 'failure' && (
+          <div className="px-3 py-2 bg-red-950/20">
+            <div className="text-[10px] uppercase tracking-wide text-red-400 mb-1">
+              Run failed
+            </div>
+            <div className="flex gap-2 items-center" onClick={(e) => e.stopPropagation()}>
+              <button
+                type="button"
+                onClick={() => retryOrContinue('retry')}
+                disabled={!!actionBusy || liveChildExists}
+                title={liveChildExists ? 'A retry is already running.' : 'Re-run with same instructions'}
+                className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
+              >
+                {actionBusy === 'retry' && (
+                  <span className="animate-spin inline-block w-3 h-3 border border-zinc-400 border-t-transparent rounded-full" />
+                )}
+                {actionBusy === 'retry' ? 'Retrying…' : 'Retry'}
+              </button>
+              <button
+                type="button"
+                onClick={() => retryOrContinue('continue')}
+                disabled={!!actionBusy || liveChildExists}
+                title={liveChildExists ? 'A retry is already running.' : 'Re-run with prior failure context stitched in'}
+                className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
+              >
+                {actionBusy === 'continue' && (
+                  <span className="animate-spin inline-block w-3 h-3 border border-zinc-400 border-t-transparent rounded-full" />
+                )}
+                {actionBusy === 'continue' ? 'Continuing…' : 'Continue'}
               </button>
               {actionError && <span className="text-red-400 text-[11px]">{actionError}</span>}
             </div>

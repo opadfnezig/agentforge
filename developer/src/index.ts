@@ -91,7 +91,18 @@ async function gitCommitAndPush(cwd: string, message: string, branch: string): P
 // Prompt templates
 // ---------------------------------------------------------------------------
 
-function buildImplementPrompt(instructions: string): string {
+function buildTaskSection(instructions: string, resumeContext: string | null | undefined, taskHeader: string): string {
+  if (resumeContext && resumeContext.length > 0) {
+    return `## Previous attempt context
+${resumeContext}
+## Current task
+${instructions}`;
+  }
+  return `${taskHeader}
+${instructions}`;
+}
+
+function buildImplementPrompt(instructions: string, resumeContext?: string | null): string {
   return `You are an AgentForge developer working on the project at /workspace.
 
 ## Critical guidance
@@ -115,14 +126,13 @@ Before doing anything else, scan the Task below for these four sections. If any 
 
 If all four sections are present and coherent, proceed. Respect the STOP criteria mid-run — if you hit one during execution, halt and report rather than guessing.
 
-## Task
-${instructions}
+${buildTaskSection(instructions, resumeContext, '## Task')}
 
 Complete the task. You don't need to commit — the coordinator handles that after you finish.
 `;
 }
 
-function buildClarifyPrompt(instructions: string): string {
+function buildClarifyPrompt(instructions: string, resumeContext?: string | null): string {
   return `You are an AgentForge developer in CLARIFY mode. You will NOT make changes. Your job is to:
 1. Read the relevant files to understand the current state
 2. Identify ambiguities in the instructions
@@ -133,8 +143,7 @@ USE BULK READS — read multiple related files in parallel. Understand the code 
 ## Required dispatch structure
 A well-formed dispatch should contain four labeled sections: STOP criteria, Out of scope, Commit/report contract, Read-before-write requirements. In clarify mode, if any of these are missing, flag that explicitly in your questions — the coordinator needs to add them before you can implement.
 
-## Task (do not implement, only clarify)
-${instructions}
+${buildTaskSection(instructions, resumeContext, '## Task (do not implement, only clarify)')}
 
 Return ONLY the clarifying questions. Be specific. Reference file paths and line numbers. If there are no ambiguities, say so and list your planned approach for confirmation.
 `;
@@ -149,6 +158,7 @@ type DispatchMessage = {
   runId: string;
   instructions: string;
   mode: 'implement' | 'clarify';
+  resumeContext?: string | null;
 };
 
 type IncomingMessage = DispatchMessage | { type: string; [k: string]: unknown };
@@ -259,8 +269,8 @@ class DeveloperClient {
   }
 
   private async handleDispatch(msg: DispatchMessage): Promise<void> {
-    const { runId, instructions, mode } = msg;
-    log(`Dispatch runId=${runId} mode=${mode}`);
+    const { runId, instructions, mode, resumeContext } = msg;
+    log(`Dispatch runId=${runId} mode=${mode}${resumeContext ? ' (with resume_context)' : ''}`);
 
     if (this.currentRun) {
       logErr(`Rejecting dispatch; run ${this.currentRun.runId} already in progress`);
@@ -310,8 +320,8 @@ class DeveloperClient {
     }
 
     const prompt = mode === 'clarify'
-      ? buildClarifyPrompt(instructions)
-      : buildImplementPrompt(instructions);
+      ? buildClarifyPrompt(instructions, resumeContext)
+      : buildImplementPrompt(instructions, resumeContext);
 
     const { exitCode, finalAssistantText } = await this.runClaude(runId, prompt);
 

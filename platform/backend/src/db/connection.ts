@@ -208,6 +208,8 @@ export interface DbDeveloperRun {
   trailer: Record<string, unknown> | string | null
   push_status: string | null
   push_error: string | null
+  resume_context: string | null
+  parent_run_id: string | null
   created_at: Date
   updated_at: Date
 }
