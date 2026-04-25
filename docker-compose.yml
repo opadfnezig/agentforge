@@ -43,8 +43,8 @@ services:
     volumes:
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock
-      - ~/.claude:/mnt/claude-src:ro
-      - ~/.claude.json:/mnt/claude-src.json:ro
+      - ~/.claude/.credentials.json:/home/appuser/.claude/.credentials.json:ro
+      - ~/.claude.json:/home/appuser/.claude.json:ro
     ports:
       - "3001:3001"
       - "8900-8910:8900-8910"  # code-server ports
@@ -96,8 +96,8 @@ services:
       - GIT_BRANCH=main
     volumes:
       - /home/user/agentforge:/workspace
-      - ~/.claude:/home/agent/.claude
-      - ~/.claude.json:/home/agent/.claude.json
+      - ~/.claude/.credentials.json:/home/agent/.claude/.credentials.json:ro
+      - ~/.claude.json:/home/agent/.claude.json:ro
       - ~/.ssh:/mnt/ssh-src:ro
     depends_on:
       - backend

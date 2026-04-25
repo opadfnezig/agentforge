@@ -39,14 +39,14 @@ RUN find dist -name "*.d.ts" -delete && find dist -name "*.d.ts.map" -delete
 # Remove TS knexfile to avoid conflict, use CJS version
 RUN rm -f knexfile.ts
 
-# Ensure appuser owns the app dir and create home
-RUN chown -R appuser:appuser /app /home/appuser
+# Pre-create writable .claude dir so the RO credential file mount has a parent
+# the CLI can write cache/debug/projects subdirs into.
+RUN mkdir -p /home/appuser/.claude && chown -R appuser:appuser /app /home/appuser
 
 ENV HOME=/home/appuser
 
-# Entrypoint runs as root: copies bind-mounted Claude creds into appuser-owned
-# location, then drops privileges via su-exec. Container stays non-root for the
-# actual workload (Claude CLI refuses --dangerously-skip-permissions as root).
+# Entrypoint just drops to appuser. Credentials are mounted RO from the host
+# and a host-side systemd service keeps them refreshed.
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

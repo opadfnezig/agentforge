@@ -249,7 +249,8 @@ const parseDispatchCommands = (
   return dispatches
 }
 
-// First pass: no tools, just routing decision
+// First pass: no tools, just routing decision. Prompt goes via stdin to avoid
+// argv limits and shell-quote hazards on long synthesis prompts.
 const runFirstPass = (prompt: string): Promise<string> => {
   return new Promise((resolve, reject) => {
     const args = [
@@ -258,13 +259,12 @@ const runFirstPass = (prompt: string): Promise<string> => {
       '--tools', '',
       '--model', config.COORDINATOR_MODEL,
       '--system-prompt', 'You are a coordinator routing queries to oracle knowledge bases. Follow the instructions in the user message exactly.',
-      '-p', prompt,
     ]
 
     const proc = spawn('claude', args, {
       env: { ...process.env },
       cwd: '/tmp',
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     })
 
     let output = ''
@@ -272,6 +272,9 @@ const runFirstPass = (prompt: string): Promise<string> => {
 
     proc.stdout.on('data', (d) => { output += d.toString() })
     proc.stderr.on('data', (d) => { stderr += d.toString() })
+
+    proc.stdin.write(prompt)
+    proc.stdin.end()
 
     proc.on('close', (code) => {
       if (code === 0) resolve(output.trim())
@@ -285,7 +288,7 @@ const runFirstPass = (prompt: string): Promise<string> => {
   })
 }
 
-// Second pass: stream-json, no tools, same pattern as agent-runner
+// Second pass: stream-json, no tools. Prompt via stdin (same reason as first pass).
 const runSecondPass = async (
   prompt: string,
   onText: (text: string) => void
@@ -299,14 +302,16 @@ const runSecondPass = async (
       '--tools', '',
       '--model', config.COORDINATOR_MODEL,
       '--system-prompt', 'You are a coordinator synthesizing oracle knowledge base responses. Follow the instructions in the user message exactly.',
-      '-p', prompt,
     ]
 
     const proc = spawn('claude', args, {
       env: { ...process.env },
       cwd: '/tmp',
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     })
+
+    proc.stdin.write(prompt)
+    proc.stdin.end()
 
     let fullText = ''
     let stderr = ''
