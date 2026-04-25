@@ -1,5 +1,3 @@
-import { spawn } from 'child_process'
-import { createInterface } from 'readline'
 import { readFile } from 'fs/promises'
 import { join } from 'path'
 import { config } from '../config.js'
@@ -8,7 +6,28 @@ import * as oracleQueries from '../db/queries/oracles.js'
 import * as developerQueries from '../db/queries/developers.js'
 import { queryOracle } from './oracle-engine.js'
 import { developerRegistry } from './developer-registry.js'
-import type { RunMode } from '../schemas/developer.js'
+import type { RunMode, DeveloperRun } from '../schemas/developer.js'
+import {
+  chatCompletion,
+  chatCompletionStream,
+  type MessageTrailer,
+} from '../lib/anthropic-oauth.js'
+
+const FIRST_PASS_SYSTEM_PROMPT =
+  'You are a coordinator routing queries to oracle knowledge bases. Follow the instructions in the user message exactly.'
+const SECOND_PASS_SYSTEM_PROMPT =
+  'You are a coordinator synthesizing oracle knowledge base responses. Follow the instructions in the user message exactly.'
+
+// Matches the implicit Claude Code default for Opus (verified via mitm-poc:
+// `max_tokens: 64000` per request body capture). The replaced subprocess
+// (`claude --print --tools ''`) didn't pass --max-tokens, so it used this same
+// internal default. Preserving it keeps response budgets identical post-swap.
+const COORDINATOR_MAX_TOKENS = 64_000
+
+export interface TurnTrailer {
+  first_pass: MessageTrailer
+  second_pass: MessageTrailer | null
+}
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
@@ -31,18 +50,16 @@ export type CoordinatorEvent =
       queued: boolean
       pending: boolean
     }
+  | {
+      type: 'read'
+      runId: string
+      found: boolean
+      status: string | null
+      developerName: string | null
+      report: string
+    }
   | { type: 'text'; text: string }
   | { type: 'done' }
-
-interface ClaudeStreamEvent {
-  type: string
-  subtype?: string
-  message?: {
-    content?: Array<{ type: string; text?: string }>
-  }
-  result?: string
-  error?: string
-}
 
 interface OracleSummary {
   domain: string
@@ -129,6 +146,26 @@ Modes:
 - implement: developer will make changes, commit and push if git repo (use for actual work)
 - clarify: developer reads the code and asks clarifying questions, never commits (use when instructions would be ambiguous)
 
+To pull the report for a previously dispatched run by its UUID:
+[read, run-id]
+[end]
+
+Reports are PULL-ONLY — they are NEVER auto-injected into your context. You must explicitly issue [read, run-id] for each report you want to see. Use this when:
+- The user asks "what did run X say?" / "did the dispatch finish?" / "show me the result".
+- You need a prior run's outcome to inform the next dispatch (e.g. follow-up work that depends on what was changed).
+- You want to verify a dispatch landed before queueing dependent work.
+
+The runId is the UUID shown in the dispatch badge (e.g. \`c5278321-9a83-4a01-b3ca-b2659cd24948\`). It's also returned in your previous synthesis turn whenever you emit a [dispatch, ...].
+
+Behavior by run state:
+- completed (success / no_changes): returns final report text + git SHAs + push status + cost/duration trailer.
+- failed: returns error message + whatever final text was captured.
+- still running / queued / pending: returns current status + elapsed time. No partial output is streamed — re-issue [read, ...] later to check again.
+- cancelled: returns cancelled marker.
+- unknown id: returns "run not found".
+
+Reads are cheap (DB lookup, no LLM call). Read multiple in one turn if useful. Do NOT read every dispatch reflexively — only when the report content actually informs your next decision.
+
 ## Required dispatch structure
 
 Every dispatch you emit MUST contain these four labeled sections. The developer will refuse the dispatch (or proceed blindly) if any are missing or contradictory. Write them confidently — the user reviews and approves the dispatch before it executes, so being precise is more valuable than being tentative.
@@ -185,15 +222,17 @@ const buildSecondPassPrompt = (
   profile: string,
   oracleResponses: { domain: string; question: string; response: string }[],
   dispatchResults: DispatchResult[],
+  readResults: ReadResult[],
   history: ChatMessage[],
   message: string
 ): string => {
-  let prompt = `You are a coordinator. You just queried oracles and/or dispatched developers — results are below. Synthesize a response for the user.
+  let prompt = `You are a coordinator. You just queried oracles, dispatched developers, and/or pulled run reports — results are below. Synthesize a response for the user.
 
-- Answer the user's question directly, using oracle data as source of truth.
+- Answer the user's question directly, using oracle data and run reports as source of truth.
 - If you dispatched, tell the user briefly: which developer, mode, and that the dispatch is awaiting their approval in the chat badge. Dispatches do NOT execute until the user approves — treat them as provisional.
 - Do NOT repeat the full dispatch instructions in your user message. The user can expand the dispatch badge to see them (and can edit them before approving).
 - When you dispatched, ALWAYS include a "## Decisions I Made" section in your user-facing message. List the assumptions you made and ambiguities you resolved on the user's behalf (e.g. "picked implement over clarify because X", "scoped to module Y, skipped Z", "chose name/path W because V"). This is the user's chance to catch you before they approve the dispatch.
+- If you pulled a run report, summarize what the run accomplished (or failed at) — the user wants the takeaway, not a dump of the full report. They can expand the read badge to see the raw text.
 - Be dense. No filler, no meta-commentary about oracles or your process.
 - You have live oracle/developer access every turn — never say otherwise.`
 
@@ -211,6 +250,10 @@ const buildSecondPassPrompt = (
     } else {
       prompt += `\n\n--- DISPATCHED (pending approval): ${d.developer} (mode: ${d.mode}, runId: ${d.runId}) ---\nInstructions: ${d.instructions}\n--- END DISPATCH ---`
     }
+  }
+
+  for (const r of readResults) {
+    prompt += `\n\n--- READ RUN: ${r.runId} ---\n${r.report}\n--- END READ ---`
   }
 
   prompt += formatHistory(history)
@@ -249,116 +292,131 @@ const parseDispatchCommands = (
   return dispatches
 }
 
-// First pass: no tools, just routing decision. Prompt goes via stdin to avoid
-// argv limits and shell-quote hazards on long synthesis prompts.
-const runFirstPass = (prompt: string): Promise<string> => {
-  return new Promise((resolve, reject) => {
-    const args = [
-      '--dangerously-skip-permissions',
-      '--print',
-      '--tools', '',
-      '--model', config.COORDINATOR_MODEL,
-      '--system-prompt', 'You are a coordinator routing queries to oracle knowledge bases. Follow the instructions in the user message exactly.',
-    ]
-
-    const proc = spawn('claude', args, {
-      env: { ...process.env },
-      cwd: '/tmp',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
-
-    let output = ''
-    let stderr = ''
-
-    proc.stdout.on('data', (d) => { output += d.toString() })
-    proc.stderr.on('data', (d) => { stderr += d.toString() })
-
-    proc.stdin.write(prompt)
-    proc.stdin.end()
-
-    proc.on('close', (code) => {
-      if (code === 0) resolve(output.trim())
-      else {
-        logger.error({ code, stderr: stderr.slice(0, 500) }, 'Coordinator first pass failed')
-        reject(new Error(`First pass failed (${code}): ${stderr.slice(0, 200)}`))
-      }
-    })
-
-    proc.on('error', reject)
-  })
+// Pull-on-demand: [read, run-id] [end]. Body is intentionally empty (the
+// runId fully identifies the report to fetch). Tolerant of an optional
+// blank/comment line between the header and [end] so model output that drifts
+// from the strict shape still parses.
+const parseReadCommands = (output: string): { runId: string }[] => {
+  const reads: { runId: string }[] = []
+  const regex = /\[read,\s*([^\]]+)\]\s*(?:\n[\s\S]*?)?\n?\[end\]/gi
+  let match
+  while ((match = regex.exec(output)) !== null) {
+    reads.push({ runId: match[1].trim() })
+  }
+  return reads
 }
 
-// Second pass: stream-json, no tools. Prompt via stdin (same reason as first pass).
-const runSecondPass = async (
-  prompt: string,
-  onText: (text: string) => void
-): Promise<string> => {
-  return new Promise((resolve, reject) => {
-    const args = [
-      '--dangerously-skip-permissions',
-      '--verbose',
-      '--print',
-      '--output-format', 'stream-json',
-      '--tools', '',
-      '--model', config.COORDINATOR_MODEL,
-      '--system-prompt', 'You are a coordinator synthesizing oracle knowledge base responses. Follow the instructions in the user message exactly.',
-    ]
+interface ReadResult {
+  runId: string
+  found: boolean
+  status: string | null
+  developerName: string | null
+  report: string
+}
 
-    const proc = spawn('claude', args, {
-      env: { ...process.env },
-      cwd: '/tmp',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
+const formatTimestamp = (d: Date | string | null): string | null => {
+  if (!d) return null
+  const dt = typeof d === 'string' ? new Date(d) : d
+  if (Number.isNaN(dt.getTime())) return null
+  return dt.toISOString()
+}
 
-    proc.stdin.write(prompt)
-    proc.stdin.end()
+const formatRunReport = (run: DeveloperRun, developerName: string | null): string => {
+  const lines: string[] = []
+  lines.push(`runId: ${run.id}`)
+  lines.push(`developer: ${developerName ?? run.developerId}`)
+  lines.push(`mode: ${run.mode}`)
+  lines.push(`status: ${run.status}`)
 
-    let fullText = ''
-    let stderr = ''
-    const rl = createInterface({ input: proc.stdout })
+  const created = formatTimestamp(run.createdAt)
+  const started = formatTimestamp(run.startedAt)
+  const finished = formatTimestamp(run.finishedAt)
+  if (created) lines.push(`created: ${created}`)
+  if (started) lines.push(`started: ${started}`)
+  if (finished) lines.push(`finished: ${finished}`)
 
-    rl.on('line', (line) => {
-      if (!line.trim()) return
-      try {
-        const event = JSON.parse(line) as ClaudeStreamEvent
+  // Elapsed for in-flight runs so the coordinator can decide whether to wait.
+  if (started && !finished) {
+    const elapsedMs = Date.now() - new Date(started).getTime()
+    if (Number.isFinite(elapsedMs) && elapsedMs >= 0) {
+      lines.push(`elapsed_ms: ${elapsedMs}`)
+    }
+  }
 
-        if (event.type === 'assistant' && event.message?.content) {
-          for (const block of event.message.content) {
-            if (block.type === 'text' && block.text) {
-              onText(block.text)
-              fullText += block.text
-            }
-          }
-        } else if (event.type === 'result' && event.result) {
-          if (!fullText) {
-            onText(event.result)
-            fullText = event.result
-          }
-        }
-      } catch {
-        // non-JSON
-      }
-    })
+  if (run.gitShaStart) lines.push(`git_sha_start: ${run.gitShaStart}`)
+  if (run.gitShaEnd) lines.push(`git_sha_end: ${run.gitShaEnd}`)
+  if (run.pushStatus) lines.push(`push_status: ${run.pushStatus}`)
+  if (run.pushError) lines.push(`push_error: ${run.pushError}`)
+  if (run.model) lines.push(`model: ${run.model}`)
+  if (typeof run.totalCostUsd === 'number') lines.push(`total_cost_usd: ${run.totalCostUsd}`)
+  if (typeof run.durationMs === 'number') lines.push(`duration_ms: ${run.durationMs}`)
+  if (run.stopReason) lines.push(`stop_reason: ${run.stopReason}`)
 
-    proc.stderr.on('data', (d) => { stderr += d.toString() })
+  // Report body. For terminal runs this is the developer's final message.
+  // For in-flight runs response is null — surface that explicitly so the
+  // coordinator doesn't think the run finished silently.
+  if (run.response) {
+    lines.push('')
+    lines.push('--- Final report ---')
+    lines.push(run.response)
+  } else if (run.status === 'pending') {
+    lines.push('')
+    lines.push('(Awaiting user approval in the chat badge — no work has started.)')
+  } else if (run.status === 'queued') {
+    lines.push('')
+    lines.push('(Approved and queued — waiting for an idle developer.)')
+  } else if (run.status === 'running') {
+    lines.push('')
+    lines.push('(Still running — no final report yet. Re-read later for the result.)')
+  } else if (run.status === 'cancelled') {
+    lines.push('')
+    lines.push('(Cancelled before completion — no report.)')
+  }
 
-    proc.on('close', (code) => {
-      if (code === 0) resolve(fullText.trim())
-      else {
-        logger.error({ code, stderr: stderr.slice(0, 500) }, 'Coordinator second pass failed')
-        reject(new Error(`Second pass failed (${code}): ${stderr.slice(0, 200)}`))
-      }
-    })
+  if (run.errorMessage) {
+    lines.push('')
+    lines.push('--- Error ---')
+    lines.push(run.errorMessage)
+  }
 
-    proc.on('error', reject)
+  return lines.join('\n')
+}
+
+// First pass: routing decision. Non-streaming — we want the full output before
+// parsing for [query]/[dispatch]/[read] commands.
+const runFirstPassDirect = async (prompt: string): Promise<{ text: string; trailer: MessageTrailer }> => {
+  const result = await chatCompletion({
+    model: config.COORDINATOR_MODEL,
+    systemPrompt: FIRST_PASS_SYSTEM_PROMPT,
+    messages: [{ role: 'user', content: prompt }],
+    maxTokens: COORDINATOR_MAX_TOKENS,
   })
+  return { text: result.content.trim(), trailer: result.trailer }
+}
+
+// Second pass: streaming synthesis. Each text token is emitted via onText so
+// the SSE channel can forward it as the existing { type: 'text' } event.
+const runSecondPassDirect = async (
+  prompt: string,
+  onText: (text: string) => void,
+): Promise<{ text: string; trailer: MessageTrailer }> => {
+  const result = await chatCompletionStream(
+    {
+      model: config.COORDINATOR_MODEL,
+      systemPrompt: SECOND_PASS_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: prompt }],
+      maxTokens: COORDINATOR_MAX_TOKENS,
+    },
+    onText,
+  )
+  return { text: result.content.trim(), trailer: result.trailer }
 }
 
 export const run = async (
   message: string,
   history: ChatMessage[],
   emit: (event: CoordinatorEvent) => void
-): Promise<string> => {
+): Promise<{ text: string; trailer: TurnTrailer }> => {
   const [profile, oracleList, developerList] = await Promise.all([
     loadUserProfile(),
     loadOracleList(),
@@ -368,27 +426,34 @@ export const run = async (
   emit({ type: 'status', message: `Deciding (${oracleList.length} oracles, ${developerList.length} devs available)...` })
 
   const firstPassPrompt = buildFirstPassPrompt(profile, oracleList, developerList, history, message)
-  const firstPassOutput = await runFirstPass(firstPassPrompt)
+  const { text: firstPassOutput, trailer: firstPassTrailer } = await runFirstPassDirect(firstPassPrompt)
   const queries = parseQueryCommands(firstPassOutput)
   const dispatches = parseDispatchCommands(firstPassOutput)
+  const reads = parseReadCommands(firstPassOutput)
 
   // Log every first-pass for debugging command parsing
   logger.info({
     queriesFound: queries.length,
     dispatchesFound: dispatches.length,
+    readsFound: reads.length,
     outputPreview: firstPassOutput.slice(0, 800),
+    firstPassCostUsd: firstPassTrailer.cost_usd,
+    firstPassTokens: { input: firstPassTrailer.input_tokens, output: firstPassTrailer.output_tokens },
   }, 'Coordinator first pass decision')
 
   // No commands — direct answer
-  if (queries.length === 0 && dispatches.length === 0) {
+  if (queries.length === 0 && dispatches.length === 0 && reads.length === 0) {
     logger.info('Coordinator answered directly')
     emit({ type: 'text', text: firstPassOutput })
     emit({ type: 'done' })
-    return firstPassOutput
+    return { text: firstPassOutput, trailer: { first_pass: firstPassTrailer, second_pass: null } }
   }
 
   if (queries.length > 0) {
     emit({ type: 'status', message: `Querying ${queries.length} oracle(s): ${queries.map((q) => q.domain).join(', ')}` })
+  }
+  if (reads.length > 0) {
+    emit({ type: 'status', message: `Reading ${reads.length} run report(s)` })
   }
 
   const [allOracles, allDevelopers] = await Promise.all([
@@ -397,9 +462,10 @@ export const run = async (
   ])
   const oraclesByDomain = new Map(allOracles.map((o) => [o.domain, o]))
   const developersByName = new Map(allDevelopers.map((d) => [d.name, d]))
+  const developersById = new Map(allDevelopers.map((d) => [d.id, d]))
 
-  // Oracle queries + dispatches in parallel
-  const [oracleResponses, dispatchResults] = await Promise.all([
+  // Oracle queries + dispatches + reads in parallel
+  const [oracleResponses, dispatchResults, readResults] = await Promise.all([
     Promise.all(
       queries.map(async (q) => {
         const oracle = oraclesByDomain.get(q.domain)
@@ -450,15 +516,75 @@ export const run = async (
         }
       })
     ),
+    Promise.all(
+      reads.map(async (r): Promise<ReadResult> => {
+        // UUID format check up front — anything else is almost certainly a
+        // typo, and getRun would round-trip to the DB just to return null.
+        const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(r.runId)
+        if (!isUuid) {
+          const result: ReadResult = {
+            runId: r.runId,
+            found: false,
+            status: null,
+            developerName: null,
+            report: `Run id "${r.runId}" is not a valid UUID. Run ids look like c5278321-9a83-4a01-b3ca-b2659cd24948 — copy them from a dispatch badge in this chat.`,
+          }
+          emit({ type: 'read', ...result })
+          return result
+        }
+        try {
+          const run = await developerQueries.getRun(r.runId)
+          if (!run) {
+            const result: ReadResult = {
+              runId: r.runId,
+              found: false,
+              status: null,
+              developerName: null,
+              report: `Run "${r.runId}" not found.`,
+            }
+            emit({ type: 'read', ...result })
+            return result
+          }
+          const dev = developersById.get(run.developerId)
+          const developerName = dev?.name ?? null
+          const result: ReadResult = {
+            runId: run.id,
+            found: true,
+            status: run.status,
+            developerName,
+            report: formatRunReport(run, developerName),
+          }
+          emit({ type: 'read', ...result })
+          return result
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          const result: ReadResult = {
+            runId: r.runId,
+            found: false,
+            status: null,
+            developerName: null,
+            report: `[Read failed: ${msg}]`,
+          }
+          emit({ type: 'read', ...result })
+          return result
+        }
+      })
+    ),
   ])
 
   emit({ type: 'status', message: 'Synthesizing...' })
 
-  const secondPrompt = buildSecondPassPrompt(profile, oracleResponses, dispatchResults, history, message)
-  const fullText = await runSecondPass(secondPrompt, (text) => {
+  const secondPrompt = buildSecondPassPrompt(profile, oracleResponses, dispatchResults, readResults, history, message)
+  const { text: fullText, trailer: secondPassTrailer } = await runSecondPassDirect(secondPrompt, (text) => {
     emit({ type: 'text', text })
   })
 
+  logger.info({
+    secondPassCostUsd: secondPassTrailer.cost_usd,
+    secondPassTokens: { input: secondPassTrailer.input_tokens, output: secondPassTrailer.output_tokens },
+    stopReason: secondPassTrailer.stop_reason,
+  }, 'Coordinator second pass complete')
+
   emit({ type: 'done' })
-  return fullText
+  return { text: fullText, trailer: { first_pass: firstPassTrailer, second_pass: secondPassTrailer } }
 }
