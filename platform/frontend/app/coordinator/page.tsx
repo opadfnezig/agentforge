@@ -44,6 +44,12 @@ const hasSaveCommands = (text: string): boolean => {
   return SAVE_REGEX.test(text)
 }
 
+// Per-chat draft persistence in localStorage. Key includes the chat id so each
+// chat keeps its own unsent text across reloads / accidental nav-aways.
+const DRAFT_KEY_PREFIX = 'agentforge:coordinator:draft:'
+const DRAFT_DEBOUNCE_MS = 250
+const draftKeyFor = (chatId: string) => `${DRAFT_KEY_PREFIX}${chatId}`
+
 // Strip oracle/dispatch-data sentinels (HTML comment)
 const ORACLE_SENTINEL_REGEX = /\n*<!--ORACLES:[\s\S]*?:ORACLES-->\s*$/
 const DISPATCH_SENTINEL_REGEX = /\n*<!--DISPATCHES:[\s\S]*?:DISPATCHES-->\s*$/g
@@ -111,6 +117,36 @@ export default function CoordinatorPage() {
     }
   }, [messages, statusText])
 
+  // Restore the per-chat draft when the active chat changes.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    if (!activeChatId) {
+      setInput('')
+      return
+    }
+    try {
+      setInput(localStorage.getItem(draftKeyFor(activeChatId)) ?? '')
+    } catch {
+      setInput('')
+    }
+  }, [activeChatId])
+
+  // Persist the current draft (debounced). Skipped while loading so an
+  // optimistic setInput('') during send doesn't clobber a draft we may need
+  // to restore on send-failure.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    if (!activeChatId || loading) return
+    const key = draftKeyFor(activeChatId)
+    const t = setTimeout(() => {
+      try {
+        if (input) localStorage.setItem(key, input)
+        else localStorage.removeItem(key)
+      } catch { /* quota / disabled — best-effort */ }
+    }, DRAFT_DEBOUNCE_MS)
+    return () => clearTimeout(t)
+  }, [input, activeChatId, loading])
+
   const createChat = async () => {
     const res = await fetch('/api/coordinator/chats', {
       method: 'POST',
@@ -134,10 +170,11 @@ export default function CoordinatorPage() {
     }
   }
 
-  const handleSave = async (text: string) => {
-    if (!activeChatId) return
+  const handleSave = async (text: string): Promise<boolean> => {
+    if (!activeChatId) return false
     setMessages(prev => [...prev, { role: 'user', content: text }])
     setLoading(true)
+    let ok = false
     try {
       const res = await fetch(`/api/coordinator/chats/${activeChatId}/save`, {
         method: 'POST',
@@ -150,6 +187,7 @@ export default function CoordinatorPage() {
         .map(r => r.status === 'merged' ? `[${r.domain}] merged` : `[${r.domain}] error: ${r.error}`)
         .join('\n')
       setMessages(prev => [...prev, { role: 'system', content: summary }])
+      ok = res.ok
     } catch (err) {
       setMessages(prev => [...prev, {
         role: 'system',
@@ -159,13 +197,15 @@ export default function CoordinatorPage() {
       setLoading(false)
       loadChats()
     }
+    return ok
   }
 
-  const handleChat = async (text: string) => {
-    if (!activeChatId) return
+  const handleChat = async (text: string): Promise<boolean> => {
+    if (!activeChatId) return false
     setMessages(prev => [...prev, { role: 'user', content: text }])
     setLoading(true)
     setStatusText('')
+    let messageAccepted = false
 
     // Add placeholder assistant message
     const assistantIdx = { current: -1 }
@@ -183,6 +223,9 @@ export default function CoordinatorPage() {
 
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       if (!res.body) throw new Error('No response body')
+      // Server has accepted the user message at this point — even if the
+      // streamed reply errors mid-flight, the original message is committed.
+      messageAccepted = true
 
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
@@ -302,17 +345,23 @@ export default function CoordinatorPage() {
       setStatusText('')
       loadChats()
     }
+    return messageAccepted
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     const text = input.trim()
     if (!text || loading || !activeChatId) return
+    const chatId = activeChatId
     setInput('')
-    if (hasSaveCommands(text)) {
-      await handleSave(text)
-    } else {
-      await handleChat(text)
+    const sent = hasSaveCommands(text) ? await handleSave(text) : await handleChat(text)
+    if (sent) {
+      try { localStorage.removeItem(draftKeyFor(chatId)) } catch { /* best-effort */ }
+    } else if (chatId === activeChatId) {
+      // Send didn't go through — restore the unsent text so it isn't lost.
+      // (Only if the user is still on the same chat; otherwise localStorage
+      // already preserves the draft for when they navigate back.)
+      setInput(text)
     }
   }
 
