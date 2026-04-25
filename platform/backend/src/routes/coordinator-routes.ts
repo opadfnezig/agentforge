@@ -136,10 +136,14 @@ coordinatorRouter.post('/chats/:id/message', async (req, res, next) => {
     const priorMessages = await chatDb.getMessages(chat.id)
     const history = priorMessages.map((m) => ({
       role: m.role,
-      // Strip persisted oracle/dispatch sentinels so they don't leak into the next prompt
+      // Strip persisted oracle/dispatch/read sentinels so they don't leak into
+      // the next prompt. Reads in particular are pull-only — re-injecting prior
+      // read results would recreate the auto-injection problem we explicitly
+      // avoided. The coordinator must re-issue [read, ...] if it needs the data.
       content: m.content
         .replace(/\n*<!--ORACLES:[\s\S]*?:ORACLES-->\s*/g, '')
-        .replace(/\n*<!--DISPATCHES:[\s\S]*?:DISPATCHES-->\s*/g, ''),
+        .replace(/\n*<!--DISPATCHES:[\s\S]*?:DISPATCHES-->\s*/g, '')
+        .replace(/\n*<!--READS:[\s\S]*?:READS-->\s*/g, ''),
     }))
 
     await chatDb.addMessage(chat.id, 'user', message)
@@ -161,8 +165,15 @@ coordinatorRouter.post('/chats/:id/message', async (req, res, next) => {
       queued: boolean
       pending: boolean
     }[] = []
+    const collectedReads: {
+      runId: string
+      found: boolean
+      status: string | null
+      developerName: string | null
+      report: string
+    }[] = []
 
-    const fullText = await run(message, history, (event) => {
+    const { text: fullText, trailer } = await run(message, history, (event) => {
       if (event.type === 'oracle') {
         collectedOracles.push({ domain: event.domain, question: event.question, response: event.response })
       } else if (event.type === 'dispatch') {
@@ -175,11 +186,19 @@ coordinatorRouter.post('/chats/:id/message', async (req, res, next) => {
           queued: event.queued,
           pending: event.pending,
         })
+      } else if (event.type === 'read') {
+        collectedReads.push({
+          runId: event.runId,
+          found: event.found,
+          status: event.status,
+          developerName: event.developerName,
+          report: event.report,
+        })
       }
       sendSSE(res, event)
     })
 
-    // Persist — append oracle/dispatch data as JSON sentinels so badges expand on reload
+    // Persist — append oracle/dispatch/read data as JSON sentinels so badges expand on reload
     if (fullText) {
       let stored = fullText
       if (collectedOracles.length > 0) {
@@ -188,12 +207,27 @@ coordinatorRouter.post('/chats/:id/message', async (req, res, next) => {
       if (collectedDispatches.length > 0) {
         stored += `\n\n<!--DISPATCHES:${JSON.stringify(collectedDispatches)}:DISPATCHES-->`
       }
-      await chatDb.addMessage(chat.id, 'assistant', stored)
-      await chatDb.touchChat(chat.id)
+      if (collectedReads.length > 0) {
+        stored += `\n\n<!--READS:${JSON.stringify(collectedReads)}:READS-->`
+      }
+      // Roll up both passes into the message-level summary; second pass is the
+      // user-facing one when present, else we attribute everything to the first.
+      const primary = trailer.second_pass ?? trailer.first_pass
+      const totalCostUsd = trailer.first_pass.cost_usd + (trailer.second_pass?.cost_usd ?? 0)
+      const totalDurationMs = trailer.first_pass.duration_ms + (trailer.second_pass?.duration_ms ?? 0)
+      await chatDb.addMessage(chat.id, 'assistant', stored, {
+        provider: 'anthropic-oauth',
+        model: primary.model,
+        totalCostUsd,
+        durationMs: totalDurationMs,
+        stopReason: primary.stop_reason,
+        trailer: trailer as unknown as Record<string, unknown>,
+      })
+      await chatDb.touchChat(chat.id, { addCostUsd: totalCostUsd, addDurationMs: totalDurationMs })
     }
 
     res.end()
-    logger.info({ chatId: chat.id }, 'Coordinator completed')
+    logger.info({ chatId: chat.id, totalCostUsd: trailer.first_pass.cost_usd + (trailer.second_pass?.cost_usd ?? 0) }, 'Coordinator completed')
   } catch (error) {
     if (res.headersSent) {
       sendSSE(res, { type: 'status', message: `Error: ${error instanceof Error ? error.message : 'Unknown'}` })

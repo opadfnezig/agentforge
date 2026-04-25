@@ -29,12 +29,21 @@ interface DispatchInfo {
   pending?: boolean
 }
 
+interface ReadInfo {
+  runId: string
+  found: boolean
+  status: string | null
+  developerName: string | null
+  report: string
+}
+
 interface Message {
   id?: string
   role: 'user' | 'assistant' | 'system'
   content: string
   oracles?: OracleResponse[]
   dispatches?: DispatchInfo[]
+  reads?: ReadInfo[]
   status?: string
 }
 
@@ -50,11 +59,15 @@ const DRAFT_KEY_PREFIX = 'agentforge:coordinator:draft:'
 const DRAFT_DEBOUNCE_MS = 250
 const draftKeyFor = (chatId: string) => `${DRAFT_KEY_PREFIX}${chatId}`
 
-// Strip oracle/dispatch-data sentinels (HTML comment)
+// Strip oracle/dispatch/read-data sentinels (HTML comment)
 const ORACLE_SENTINEL_REGEX = /\n*<!--ORACLES:[\s\S]*?:ORACLES-->\s*$/
 const DISPATCH_SENTINEL_REGEX = /\n*<!--DISPATCHES:[\s\S]*?:DISPATCHES-->\s*$/g
+const READ_SENTINEL_REGEX = /\n*<!--READS:[\s\S]*?:READS-->\s*$/g
 const stripSentinel = (text: string): string =>
-  text.replace(ORACLE_SENTINEL_REGEX, '').replace(DISPATCH_SENTINEL_REGEX, '')
+  text
+    .replace(ORACLE_SENTINEL_REGEX, '')
+    .replace(DISPATCH_SENTINEL_REGEX, '')
+    .replace(READ_SENTINEL_REGEX, '')
 
 export default function CoordinatorPage() {
   const [chats, setChats] = useState<Chat[]>([])
@@ -80,6 +93,7 @@ export default function CoordinatorPage() {
         let content = m.content
         let oracles: OracleResponse[] | undefined
         let dispatches: DispatchInfo[] | undefined
+        let reads: ReadInfo[] | undefined
         const oracleMatch = content.match(/<!--ORACLES:([\s\S]*?):ORACLES-->/)
         if (oracleMatch) {
           try { oracles = JSON.parse(oracleMatch[1]) as OracleResponse[] } catch { /* ignore */ }
@@ -88,10 +102,15 @@ export default function CoordinatorPage() {
         if (dispatchMatch) {
           try { dispatches = JSON.parse(dispatchMatch[1]) as DispatchInfo[] } catch { /* ignore */ }
         }
+        const readMatch = content.match(/<!--READS:([\s\S]*?):READS-->/)
+        if (readMatch) {
+          try { reads = JSON.parse(readMatch[1]) as ReadInfo[] } catch { /* ignore */ }
+        }
         content = content
           .replace(/\n*<!--ORACLES:[\s\S]*?:ORACLES-->\s*/g, '')
           .replace(/\n*<!--DISPATCHES:[\s\S]*?:DISPATCHES-->\s*/g, '')
-        return { id: m.id, role: 'assistant', content, oracles, dispatches }
+          .replace(/\n*<!--READS:[\s\S]*?:READS-->\s*/g, '')
+        return { id: m.id, role: 'assistant', content, oracles, dispatches, reads }
       })
       setMessages(restored)
       setActiveChatId(id)
@@ -211,7 +230,7 @@ export default function CoordinatorPage() {
     const assistantIdx = { current: -1 }
     setMessages(prev => {
       assistantIdx.current = prev.length
-      return [...prev, { role: 'assistant', content: '', oracles: [], dispatches: [], status: '' }]
+      return [...prev, { role: 'assistant', content: '', oracles: [], dispatches: [], reads: [], status: '' }]
     })
 
     try {
@@ -233,6 +252,7 @@ export default function CoordinatorPage() {
       let accText = ''
       let accOracles: OracleResponse[] = []
       let accDispatches: DispatchInfo[] = []
+      let accReads: ReadInfo[] = []
       let currentStatus = ''
 
       // Coalesce bursts of stream chunks into a single setState per frame.
@@ -251,6 +271,7 @@ export default function CoordinatorPage() {
               content: accText,
               oracles: accOracles,
               dispatches: accDispatches,
+              reads: accReads,
               status: currentStatus,
             }
           }
@@ -307,6 +328,18 @@ export default function CoordinatorPage() {
                 : event.queued
                 ? `Queued for ${event.developer}`
                 : `Dispatched to ${event.developer}`
+              schedule()
+            } else if (event.type === 'read') {
+              accReads = [...accReads, {
+                runId: event.runId,
+                found: !!event.found,
+                status: event.status ?? null,
+                developerName: event.developerName ?? null,
+                report: event.report,
+              }]
+              currentStatus = event.found
+                ? `Read run ${String(event.runId).slice(0, 8)} (${event.status})`
+                : `Read run ${String(event.runId).slice(0, 8)} not found`
               schedule()
             } else if (event.type === 'text') {
               accText += event.text
@@ -520,6 +553,15 @@ const MessageRow = memo(function MessageRow({ message: msg, isLast, loading, onR
         </div>
       )}
 
+      {/* Read badges — coordinator pulled a prior run's report on demand */}
+      {msg.reads && msg.reads.length > 0 && (
+        <div className="mb-2 space-y-1">
+          {msg.reads.map((r, j) => (
+            <ReadBlock key={`${r.runId}-${j}`} read={r} />
+          ))}
+        </div>
+      )}
+
       {/* Message content */}
       <div
         className={`rounded-lg px-4 py-3 text-sm ${
@@ -575,6 +617,33 @@ const OracleBlock = memo(function OracleBlock({ oracle }: { oracle: OracleRespon
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{oracle.response}</ReactMarkdown>
           </div>
         </div>
+      </div>
+    </details>
+  )
+})
+
+const ReadBlock = memo(function ReadBlock({ read }: { read: ReadInfo }) {
+  const shortId = read.runId.length >= 8 ? read.runId.slice(0, 8) : read.runId
+  const statusColor = read.found
+    ? read.status === 'success' || read.status === 'no_changes'
+      ? 'text-green-400'
+      : read.status === 'failure'
+      ? 'text-red-400'
+      : read.status === 'running'
+      ? 'text-yellow-400'
+      : 'text-zinc-400'
+    : 'text-red-400'
+  return (
+    <details className="bg-zinc-900 border border-zinc-800 rounded text-xs">
+      <summary className="px-3 py-1.5 cursor-pointer text-zinc-400 hover:text-zinc-200 flex items-center gap-2 flex-wrap">
+        <span>Read run:</span>
+        <span className="font-mono text-zinc-300">{shortId}</span>
+        {read.developerName && <span className="text-indigo-400">{read.developerName}</span>}
+        <span className={`font-medium ${statusColor}`}>{read.found ? read.status ?? 'unknown' : 'not found'}</span>
+      </summary>
+      <div className="border-t border-zinc-800 px-3 py-2 max-h-96 overflow-y-auto">
+        <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Report</div>
+        <pre className="text-zinc-300 whitespace-pre-wrap break-words font-mono text-[11px]">{read.report}</pre>
       </div>
     </details>
   )
@@ -700,6 +769,8 @@ const DispatchBadge = memo(function DispatchBadge({ dispatch }: { dispatch: Disp
         <span className="font-medium text-indigo-400">{dispatch.developer}</span>
         <span className="px-1 py-0.5 rounded bg-zinc-800 text-zinc-400 font-mono">{dispatch.mode}</span>
         <span className={`font-medium ${statusColor[status] || 'text-zinc-400'}`}>{status}</span>
+        <RunIdChip runId={dispatch.runId} />
+
         {run?.pushStatus && run.pushStatus !== 'not_attempted' && (
           <PushStatusBadge pushStatus={run.pushStatus} pushError={run.pushError} />
         )}
@@ -932,6 +1003,32 @@ function formatElapsed(ms: number): string {
   const m = Math.floor(s / 60)
   const rem = s % 60
   return `${m}m ${rem}s`
+}
+
+// Click-to-copy chip showing a shortened runId. Surfaces the UUID so the user
+// can copy it for the [read, run-id] coordinator command.
+function RunIdChip({ runId }: { runId: string }) {
+  const [copied, setCopied] = useState(false)
+  const onClick = async (e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    try {
+      await navigator.clipboard.writeText(runId)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1200)
+    } catch { /* clipboard unavailable */ }
+  }
+  const short = runId.length >= 8 ? runId.slice(0, 8) : runId
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={`runId: ${runId} (click to copy)`}
+      className="px-1 py-0.5 rounded bg-zinc-800 text-zinc-500 hover:text-zinc-200 font-mono text-[10px]"
+    >
+      {copied ? 'copied' : short}
+    </button>
+  )
 }
 
 function PushStatusBadge({

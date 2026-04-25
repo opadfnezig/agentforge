@@ -152,6 +152,9 @@ export interface DbCoordinatorChat {
   title: string
   created_at: Date
   updated_at: Date
+  total_cost_usd: number
+  total_duration_ms: number | string
+  billed_message_count: number
 }
 
 export interface DbCoordinatorMessage {
@@ -160,6 +163,12 @@ export interface DbCoordinatorMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
   created_at: Date
+  provider: string | null
+  model: string | null
+  total_cost_usd: number | null
+  duration_ms: number | null
+  stop_reason: string | null
+  trailer: Record<string, unknown> | string | null
 }
 
 export interface DbDeveloper {
