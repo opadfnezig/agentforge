@@ -1,0 +1,52 @@
+# Compose file for the spawner SERVICE itself.
+#
+# This is separate from the per-primitive compose file the spawner manages
+# at ${NTFR_WORKDIR}/compose.yml.  Run this on each host that should host
+# primitives:
+#
+#   git clone <repo> ntfr-spawner-deploy && cd ntfr-spawner-deploy/spawner/deploy
+#   cp .env.example .env  &&  $EDITOR .env
+#   docker compose up -d
+#
+# TODO(ntfr): swap to `image: ghcr.io/<org>/ntfr-spawner:<tag>` once we
+# publish to a registry.
+
+name: ntfr-spawner
+
+services:
+  spawner:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: ntfr-spawner
+    restart: always
+    environment:
+      NTFR_HOST_ID: ${NTFR_HOST_ID:?NTFR_HOST_ID is required}
+      NTFR_PORT: ${NTFR_PORT:-9898}
+      NTFR_WORKDIR: /ntfr
+      NTFR_SERVER_URL: ${NTFR_SERVER_URL:-}
+      NTFR_LOG_LEVEL: ${NTFR_LOG_LEVEL:-info}
+      DOCKER_SOCKET: /var/run/docker.sock
+      NTFR_LIFECYCLE_RETRY_MAX: ${NTFR_LIFECYCLE_RETRY_MAX:-5}
+      NTFR_LIFECYCLE_RETRY_BACKOFF_MS: ${NTFR_LIFECYCLE_RETRY_BACKOFF_MS:-1000}
+      NTFR_ORPHAN_RETRY_MAX: ${NTFR_ORPHAN_RETRY_MAX:-3}
+      NTFR_ORPHAN_RETRY_BACKOFF_MS: ${NTFR_ORPHAN_RETRY_BACKOFF_MS:-10000}
+    ports:
+      - "${NTFR_PORT:-9898}:9898"
+    volumes:
+      # Host's primitive root. Spawner reads/writes here, and primitives'
+      # bind mounts in the managed compose.yml resolve to subpaths under
+      # this directory.
+      - ${NTFR_HOST_WORKDIR:-/home/ntfr/ntfr}:/ntfr
+      # Host docker socket — spawner shells out to `docker compose`.
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Allow the in-container `ntfr` user to talk to the host docker socket.
+    # Set NTFR_DOCKER_GID to the host's `getent group docker | cut -d: -f3`.
+    group_add:
+      - "${NTFR_DOCKER_GID:-998}"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:9898/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
