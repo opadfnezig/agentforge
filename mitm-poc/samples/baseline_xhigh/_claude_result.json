@@ -1,0 +1,69 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "api_error_status": null,
+  "duration_ms": 12165,
+  "duration_api_ms": 12931,
+  "num_turns": 1,
+  "result": "1. Turn switch A on and leave it on for about 10 minutes.\n2. Turn switch A off.\n3. Turn switch B on.\n4. Immediately enter the room.\n5. The bulb that is lit is controlled by B.\n6. Touch each of the two unlit bulbs; the warm one is controlled by A, and the cool one is controlled by C.\n\nWhy this works: Each switch leaves a distinct, observable signature on its bulb at the moment of entry. B is the only switch currently powered, so its bulb is the lit one. A was powered long enough to heat its bulb but is now off, so its bulb is dark yet warm. C was never on, so its bulb is dark and cool. The three states (lit, warm-and-dark, cool-and-dark) uniquely identify all three switches in a single visit.",
+  "stop_reason": "end_turn",
+  "session_id": "<redacted-session_id>",
+  "total_cost_usd": 0.07250725,
+  "usage": {
+    "input_tokens": 6,
+    "cache_creation_input_tokens": 9151,
+    "cache_read_input_tokens": 16143,
+    "output_tokens": 266,
+    "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+    },
+    "service_tier": "standard",
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 9151,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "inference_geo": "",
+    "iterations": [
+      {
+        "input_tokens": 6,
+        "output_tokens": 266,
+        "cache_read_input_tokens": 16143,
+        "cache_creation_input_tokens": 9151,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 9151
+        },
+        "type": "message"
+      }
+    ],
+    "speed": "standard"
+  },
+  "modelUsage": {
+    "claude-haiku-4-5-20251001": {
+      "inputTokens": 482,
+      "outputTokens": 16,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 0,
+      "webSearchRequests": 0,
+      "costUSD": 0.000562,
+      "contextWindow": 200000,
+      "maxOutputTokens": 32000
+    },
+    "claude-opus-4-7": {
+      "inputTokens": 6,
+      "outputTokens": 266,
+      "cacheReadInputTokens": 16143,
+      "cacheCreationInputTokens": 9151,
+      "webSearchRequests": 0,
+      "costUSD": 0.07194524999999999,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 64000
+    }
+  },
+  "permission_denials": [],
+  "terminal_reason": "completed",
+  "fast_mode_state": "off",
+  "uuid": "<redacted-uuid>"
+}

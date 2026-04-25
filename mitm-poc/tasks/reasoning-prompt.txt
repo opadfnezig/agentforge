@@ -1,0 +1,8 @@
+You will be given a small logic puzzle. Think it through carefully and answer.
+
+Three switches A, B, C in a hallway each control one of three identical bulbs in a sealed room you can only enter ONCE. You may flip switches as much as you want before entering the room, but once you open the door you cannot leave and come back. Your tools: only your eyes and hands. Describe a procedure that lets you definitively identify which switch controls which bulb. Then briefly justify why your procedure works.
+
+Output format (strict):
+1. Numbered procedure (one step per line).
+2. One short paragraph titled "Why this works:".
+No other text.

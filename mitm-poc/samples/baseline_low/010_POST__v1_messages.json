@@ -1,0 +1,134 @@
+{
+  "kind": "messages",
+  "url": "https://api.anthropic.com/v1/messages?beta=true",
+  "method": "POST",
+  "request_headers": {
+    "Accept": "application/json",
+    "Authorization": "<redacted len=115>",
+    "Content-Type": "application/json",
+    "User-Agent": "claude-cli/2.1.119 (external, sdk-cli)",
+    "X-Claude-Code-Session-Id": "<redacted>",
+    "X-Stainless-Arch": "x64",
+    "X-Stainless-Lang": "js",
+    "X-Stainless-OS": "Linux",
+    "X-Stainless-Package-Version": "0.81.0",
+    "X-Stainless-Retry-Count": "0",
+    "X-Stainless-Runtime": "node",
+    "X-Stainless-Runtime-Version": "v24.3.0",
+    "X-Stainless-Timeout": "600",
+    "anthropic-beta": "oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,structured-outputs-2025-12-15,cache-diagnosis-2026-04-07",
+    "anthropic-dangerous-direct-browser-access": "true",
+    "anthropic-version": "2023-06-01",
+    "x-app": "cli",
+    "x-client-request-id": "<redacted>",
+    "Connection": "keep-alive",
+    "Host": "api.anthropic.com",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
+    "Content-Length": "2177"
+  },
+  "request_body": {
+    "model": "claude-haiku-4-5-20251001",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "You will be given a small logic puzzle. Think it through carefully and answer.\n\nThree switches A, B, C in a hallway each control one of three identical bulbs in a sealed room you can only enter ONCE. You may flip switches as much as you want before entering the room, but once you open the door you cannot leave and come back. Your tools: only your eyes and hands. Describe a procedure that lets you definitively identify which switch controls which bulb. Then briefly justify why your procedure works.\n\nOutput format (strict):\n1. Numbered procedure (one step per line).\n2. One short paragraph titled \"Why this works:\".\nNo other text."
+          }
+        ]
+      }
+    ],
+    "system": [
+      {
+        "type": "text",
+        "text": "x-anthropic-billing-header: cc_version=2.1.119.3e8; cc_entrypoint=sdk-cli; cch=b5a8c;"
+      },
+      {
+        "type": "text",
+        "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK."
+      },
+      {
+        "type": "text",
+        "text": "Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this coding session. The title should be clear enough that the user recognizes the session in a list. Use sentence case: capitalize only the first word and proper nouns.\n\nReturn JSON with a single \"title\" field.\n\nGood examples:\n{\"title\": \"Fix login button on mobile\"}\n{\"title\": \"Add OAuth authentication\"}\n{\"title\": \"Debug failing CI tests\"}\n{\"title\": \"Refactor API client error handling\"}\n\nBad (too vague): {\"title\": \"Code changes\"}\nBad (too long): {\"title\": \"Investigate and fix the issue where the login button does not respond on mobile devices\"}\nBad (wrong case): {\"title\": \"Fix Login Button On Mobile\"}"
+      }
+    ],
+    "tools": [],
+    "metadata": {
+      "user_id": "<redacted: device_id + account_uuid + session_id>"
+    },
+    "max_tokens": 32000,
+    "temperature": 1,
+    "output_config": {
+      "format": {
+        "type": "json_schema",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "stream": true
+  },
+  "original_thinking": null,
+  "original_max_tokens": 32000,
+  "rewritten": false,
+  "rewritten_to_budget": null,
+  "response_status": 200,
+  "response_headers": {
+    "Date": "Sat, 25 Apr 2026 11:33:17 GMT",
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Transfer-Encoding": "chunked",
+    "Connection": "keep-alive",
+    "Cache-Control": "no-cache",
+    "anthropic-ratelimit-unified-status": "allowed",
+    "anthropic-ratelimit-unified-5h-status": "allowed",
+    "anthropic-ratelimit-unified-5h-reset": "1777122000",
+    "anthropic-ratelimit-unified-5h-utilization": "0.16",
+    "anthropic-ratelimit-unified-7d-status": "allowed",
+    "anthropic-ratelimit-unified-7d-reset": "1777366800",
+    "anthropic-ratelimit-unified-7d-utilization": "0.06",
+    "anthropic-ratelimit-unified-overage-status": "allowed",
+    "anthropic-ratelimit-unified-overage-reset": "1777593600",
+    "anthropic-ratelimit-unified-overage-utilization": "0.0",
+    "anthropic-ratelimit-unified-representative-claim": "five_hour",
+    "anthropic-ratelimit-unified-fallback-percentage": "0.5",
+    "anthropic-ratelimit-unified-reset": "1777122000",
+    "request-id": "<redacted>",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "anthropic-organization-id": "<redacted>",
+    "Server": "cloudflare",
+    "x-envoy-upstream-service-time": "632",
+    "Content-Encoding": "gzip",
+    "vary": "Accept-Encoding",
+    "server-timing": "x-originResponse;dur=634",
+    "cf-cache-status": "DYNAMIC",
+    "set-cookie": "<redacted len=189>",
+    "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
+    "X-Robots-Tag": "none",
+    "CF-RAY": "9f1d0828edc0f99c-PRG"
+  },
+  "response_content_type": "text/event-stream; charset=utf-8",
+  "response_usage_summary": {
+    "model": "claude-haiku-4-5-20251001",
+    "input_tokens": 482,
+    "cache_read_input_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "output_tokens": 14,
+    "stop_reason": "end_turn",
+    "thinking_blocks_seen": 0,
+    "thinking_chars_seen": 0,
+    "text_blocks_seen": 1,
+    "text_chars_seen": 46
+  },
+  "response_body_excerpt": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-haiku-4-5-20251001\",\"id\":\"msg_01PPhQm9X9jyrWTe4y3MMEfc\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":482,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"cache_creation\":{\"ephemeral_5m_input_tokens\":0,\"ephemeral_1h_input_tokens\":0},\"output_tokens\":6,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"}}     }\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"} }\n\nevent: ping\ndata: {\"type\": \"ping\"}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"{\\\"title\\\": \\\"Solve\"}    }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" three switches puzzle logic\\\"}\"}        }\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0        }\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"stop_details\":null},\"usage\":{\"input_tokens\":482,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":14,\"iterations\":[{\"input_tokens\":482,\"output_tokens\":14,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_creation\":{\"ephemeral_5m_input_tokens\":0,\"ephemeral_1h_input_tokens\":0},\"type\":\"message\"}]},\"context_management\":{\"applied_edits\":[]}              }\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"           }\n\n",
+  "captured_at": 1777116797.2486506
+}

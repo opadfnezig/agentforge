@@ -1,0 +1,138 @@
+{
+  "kind": "messages",
+  "url": "https://api.anthropic.com/v1/messages?beta=true",
+  "method": "POST",
+  "request_headers": {
+    "Accept": "application/json",
+    "Authorization": "<redacted len=115>",
+    "Content-Type": "application/json",
+    "User-Agent": "claude-cli/2.1.119 (external, sdk-cli)",
+    "X-Claude-Code-Session-Id": "<redacted>",
+    "X-Stainless-Arch": "x64",
+    "X-Stainless-Lang": "js",
+    "X-Stainless-OS": "Linux",
+    "X-Stainless-Package-Version": "0.81.0",
+    "X-Stainless-Retry-Count": "0",
+    "X-Stainless-Runtime": "node",
+    "X-Stainless-Runtime-Version": "v24.3.0",
+    "X-Stainless-Timeout": "600",
+    "anthropic-beta": "oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,structured-outputs-2025-12-15,cache-diagnosis-2026-04-07",
+    "anthropic-dangerous-direct-browser-access": "true",
+    "anthropic-version": "2023-06-01",
+    "x-app": "cli",
+    "x-client-request-id": "<redacted>",
+    "Connection": "keep-alive",
+    "Host": "api.anthropic.com",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
+    "Content-Length": "2282"
+  },
+  "request_body": {
+    "model": "claude-haiku-4-5-20251001",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "You will be given a small logic puzzle. Think it through carefully and answer.\n\nThree switches A, B, C in a hallway each control one of three identical bulbs in a sealed room you can only enter ONCE. You may flip switches as much as you want before entering the room, but once you open the door you cannot leave and come back. Your tools: only your eyes and hands. Describe a procedure that lets you definitively identify which switch controls which bulb. Then briefly justify why your procedure works.\n\nOutput format (strict):\n1. Numbered procedure (one step per line).\n2. One short paragraph titled \"Why this works:\".\nNo other text."
+          }
+        ]
+      }
+    ],
+    "system": [
+      {
+        "type": "text",
+        "text": "x-anthropic-billing-header: cc_version=2.1.119.3e8; cc_entrypoint=sdk-cli; cch=3f377;"
+      },
+      {
+        "type": "text",
+        "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK."
+      },
+      {
+        "type": "text",
+        "text": "Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this coding session. The title should be clear enough that the user recognizes the session in a list. Use sentence case: capitalize only the first word and proper nouns.\n\nReturn JSON with a single \"title\" field.\n\nGood examples:\n{\"title\": \"Fix login button on mobile\"}\n{\"title\": \"Add OAuth authentication\"}\n{\"title\": \"Debug failing CI tests\"}\n{\"title\": \"Refactor API client error handling\"}\n\nBad (too vague): {\"title\": \"Code changes\"}\nBad (too long): {\"title\": \"Investigate and fix the issue where the login button does not respond on mobile devices\"}\nBad (wrong case): {\"title\": \"Fix Login Button On Mobile\"}"
+      }
+    ],
+    "tools": [],
+    "metadata": {
+      "user_id": "<redacted: device_id + account_uuid + session_id>"
+    },
+    "max_tokens": 32000,
+    "temperature": 1,
+    "output_config": {
+      "format": {
+        "type": "json_schema",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "stream": true,
+    "thinking": {
+      "type": "enabled",
+      "budget_tokens": 16384
+    }
+  },
+  "original_thinking": null,
+  "original_max_tokens": 32000,
+  "rewritten": true,
+  "rewritten_to_budget": 16384,
+  "response_status": 200,
+  "response_headers": {
+    "Date": "Sat, 25 Apr 2026 11:36:06 GMT",
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Transfer-Encoding": "chunked",
+    "Connection": "keep-alive",
+    "Cache-Control": "no-cache",
+    "anthropic-ratelimit-unified-status": "allowed",
+    "anthropic-ratelimit-unified-5h-status": "allowed",
+    "anthropic-ratelimit-unified-5h-reset": "1777122000",
+    "anthropic-ratelimit-unified-5h-utilization": "0.17",
+    "anthropic-ratelimit-unified-7d-status": "allowed",
+    "anthropic-ratelimit-unified-7d-reset": "1777366800",
+    "anthropic-ratelimit-unified-7d-utilization": "0.06",
+    "anthropic-ratelimit-unified-overage-status": "allowed",
+    "anthropic-ratelimit-unified-overage-reset": "1777593600",
+    "anthropic-ratelimit-unified-overage-utilization": "0.0",
+    "anthropic-ratelimit-unified-representative-claim": "five_hour",
+    "anthropic-ratelimit-unified-fallback-percentage": "0.5",
+    "anthropic-ratelimit-unified-reset": "1777122000",
+    "request-id": "<redacted>",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "anthropic-organization-id": "<redacted>",
+    "Server": "cloudflare",
+    "x-envoy-upstream-service-time": "1178",
+    "Content-Encoding": "gzip",
+    "vary": "Accept-Encoding",
+    "server-timing": "x-originResponse;dur=1180",
+    "cf-cache-status": "DYNAMIC",
+    "set-cookie": "<redacted len=189>",
+    "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
+    "X-Robots-Tag": "none",
+    "CF-RAY": "9f1d0c45ceb19947-PRG"
+  },
+  "response_content_type": "text/event-stream; charset=utf-8",
+  "response_usage_summary": {
+    "model": "claude-haiku-4-5-20251001",
+    "input_tokens": 512,
+    "cache_read_input_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "output_tokens": 658,
+    "stop_reason": "end_turn",
+    "thinking_blocks_seen": 1,
+    "thinking_chars_seen": 2307,
+    "text_blocks_seen": 1,
+    "text_chars_seen": 52
+  },
+  "response_body_excerpt": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-haiku-4-5-20251001\",\"id\":\"msg_017GJXLP4r1ugYpoQNqgQx8H\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":512,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"cache_creation\":{\"ephemeral_5m_input_tokens\":0,\"ephemeral_1h_input_tokens\":0},\"output_tokens\":3,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"}}        }\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}    }\n\nevent: ping\ndata: {\"type\": \"ping\"}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"This is a\"}        }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" classic logic puzzle. Let me think through it carefully.\\n\\nThe user needs to identify\"}        }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" which switch controls which bulb, and they can flip switches as much as they want before entering, but can only enter once. They have their\"}    }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" eyes and hands to use.\\n\\nThe key insight is that bulbs have different properties:\\n- They\"} }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" can be ON or OFF\\n- If a bulb has been ON for a while, it becomes WARM/HOT\"}             }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"\\n\\nSo the procedure should be:\\n1. Turn on switch A for several minutes\\n2. Turn off\"}      }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" switch A\\n3. Turn on switch B\\n4. Enter the room\\n\\nNow when you enter\"}   }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\":\\n- The bulb that is ON corresponds to switch B\\n- The bulb that is OFF but\"}        }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" WARM/HOT corresponds to switch A (it was on but then turned off)\\n- The bulb that is OFF and\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" COOL corresponds to switch C (it was never turned on)\\n\\nThis uses the thermal property of inc\"}       }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"andescent bulbs to distinguish between switches.\\n\\nLet me format this as requested:\\n\\n1. Turn on switch A and\"}        }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" leave it on for 5 minutes\\n2. Turn off switch A\\n3. Turn on switch B\\n4. Enter the room and examine all\"}       }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" three bulbs\\n\\nWhy this works:\\nThe bulb controlled by switch B will be on\"}           }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" and bright. The bulb controlled by switch A will be off but warm/hot to the touch (\"}       }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"because it was recently on). The bulb controlled by switch C will be off and cool (because it was never turned on). By checking which\"}       }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" bulb is on, which is warm, and which is cool, you can definitively match each switch to its bulb.\"}             }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"\\n\\nActually, let me reconsider the output format. The user wants:\\n1. Numbered procedure (one step per line)\\n2. One short paragraph titled \\\"Why this works:\\\"\\n\\nSo I should\"}          }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" present it clearly.\\n\\nWait, but the user is also asking me to generate\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" a title for a coding session at the beginning. Let me re-read the context\"}          }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\".\\n\"}     }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"\\n\\nOh\"}           }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\", I see. The instruction about generating a title was for the AI system setup, but the actual task the user is asking me to do is to solve this logic puzzle. Let me focus on the logic puzzle and ignore the title generation instruction for now,\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" unless the user explicitly asks for it. The solution relies on exploiting the heat property of incandescent bulbs\u2014\"}          }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"leaving one switch on long enough to warm its bulb, then turning it off before entering.\"}          }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" This creates three distinct states: on (bright), off but warm,\"}               }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" and off but cool, allowing me to match all three switches in a\"}   }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" single observation.\"}    }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"EqsVCmMIDRgCKkCfYoF5FfCwYEsFwqHEVOmvhTZekhc97K/ivmjepZJVgmj2AWGZoi8y546wwUF6rueWwoChfs3X0RhjK5hlBMVzMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDAMImNEosc5y5WnPoBoMbVxZJ4Vjquk59mVIIjDYCjs3ygD5bF0wgfrLM7RIc9dlrb7aeVp/UEQTSvgiJaV4k59hACbAywCUNZaG+bgq9ROGfI/2DNs4J1cMNXROKEKmh07uxmP53SDm2+HsxDdH9PyjbmRqvyK2/qKv1DQu2+BPTgWG4pVHZhseKvoEbvC3LdD/vZDxYLiqieNcSUUalsNXjEbOeZT+nsa1XPGk3Que8n1qKfg+OjMuqG4N+oPl0qZRVvYoPCHJIfrTnLkvNeprcosneqqzi2oS8U4cuS609ipr5IfDgLHyvmTojNaJjgaC0EZWcdpPnRRL3DTWHi4v3ohG0FMEyNd865Yeem8gYxtr7eVeGX8DwGInKJVUtlJMynZs1IXKBi9l9z+U43W8Gu+OwxyhKoOM+VYSHqy4OJ5Mc8F/IMt00FOwn6Rwne3CEfy7ct3pqKOwBsQBMgQpmof5MxFio2JMVQxzgQtSN7fBmPEn8oBsr9w875L8Mmv/zpVvrKxcMnltxCvYOu0p9W/C5xSriH3OIRfmtuwiyfZIFzpjE6TYMcOMKdINzg2+2U2v1gYoBOfVE0CDAid4Vc3zpdAujATlY4ypjV5vhlXLbkOo/8cBR6yAKuIuP7VyraDuWVaGWno80OkNx4NSeTc8LdA7r0zafMnMVPIc1PFaX+lX4sjfknjSRSV9r5F6GGCo4pIXd+OwgN+A7UFvcU9ZtmSwBqIxZgSQ3zkAC6ISkxqMG2pYWLsWTj4gQzhIWWs33lwqzCqA7xuvkGN3JDYdObqQG2wJjmJ8udUwDgxnbe11200/f2Nz1fQyS3+CFaQkg1XaaPAbo4h67qpeXQ4fE7Coo7SjXHm3Wv5lYnbzK9IeHgsDauZjM9CxOmuFW5HgPJ0IFEnahsB7rtiYaFc5vWy0wDFguzwXDSpLFBXFQXFUmGsnc9GreUnARrKdtVPMq6XMVSHhc4Voh1Cfc4VGfiPu3w0yqM4JVZv5yBwdXpTKMtVQXJM3KDRCRC0gRhwjs0+IIFQHgLFew/TaXGJMvTcTmdVoe9Kincvo5H6Rt1PiiUTpFiWYseA8QGv3laiql/niG/gaz5z/6H9WyZOUZu5e7ehG+r7hZcfYrK7U/2SBuh42XH6nl5i0aMNP6qEH0gbfCROowswaOgpI16TDh9OHFszZ+UmWbx1g10NbJfw",
+  "captured_at": 1777116973.0088325
+}

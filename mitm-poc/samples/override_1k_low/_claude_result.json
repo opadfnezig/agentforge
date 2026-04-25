@@ -1,0 +1,59 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "api_error_status": null,
+  "duration_ms": 5136,
+  "duration_api_ms": 5085,
+  "num_turns": 1,
+  "result": "1. Turn switch A on and leave it on for about 10 minutes.\n2. Turn switch A off.\n3. Turn switch B on.\n4. Immediately enter the room.\n5. The bulb that is lit is controlled by B.\n6. Touch the two unlit bulbs; the warm one is controlled by A and the cool one is controlled by C.\n\nWhy this works: Each switch leaves a distinct, observable signature on its bulb. B's bulb is the only one currently powered, so it is lit. A's bulb was powered long enough to heat up but is now off, so it is dark but warm. C was never switched on, so its bulb is dark and cool. Three distinguishable states map one-to-one onto the three switches.",
+  "stop_reason": "end_turn",
+  "session_id": "<redacted-session_id>",
+  "total_cost_usd": 0.018552,
+  "usage": {
+    "input_tokens": 6,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 25294,
+    "output_tokens": 235,
+    "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+    },
+    "service_tier": "standard",
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 0,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "inference_geo": "",
+    "iterations": [
+      {
+        "input_tokens": 6,
+        "output_tokens": 235,
+        "cache_read_input_tokens": 25294,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 0
+        },
+        "type": "message"
+      }
+    ],
+    "speed": "standard"
+  },
+  "modelUsage": {
+    "claude-opus-4-7": {
+      "inputTokens": 6,
+      "outputTokens": 235,
+      "cacheReadInputTokens": 25294,
+      "cacheCreationInputTokens": 0,
+      "webSearchRequests": 0,
+      "costUSD": 0.018552,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 64000
+    }
+  },
+  "permission_denials": [],
+  "terminal_reason": "completed",
+  "fast_mode_state": "off",
+  "uuid": "<redacted-uuid>"
+}

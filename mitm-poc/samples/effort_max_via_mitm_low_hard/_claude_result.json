@@ -1,0 +1,59 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "api_error_status": null,
+  "duration_ms": 101079,
+  "duration_api_ms": 100976,
+  "num_turns": 1,
+  "result": "Reasoning:\n\n**Setting up the structure**\n\nCondition (b) requires digits d\u2081 < d\u2082 < d\u2083 < d\u2084. Since they're strictly increasing, they're distinct, and the smallest is the leading digit. If 0 were one of them, it would have to be the leading digit (smallest), making n a 3-digit number. So all four digits come from {1, 2, ..., 9}, and any size-4 subset of {1,...,9} corresponds to exactly one valid n (digits in increasing order).\n\nTotal count of strictly-increasing 4-digit numbers: C(9,4) = 126.\n\n**Range of digit sums**\n\nMin sum: 1+2+3+4 = 10. Max sum: 6+7+8+9 = 30. So digit-sum \u2208 [10, 30].\n\n**Combining (c) and (d)**\n\nn divisible by 3 \u27fa digit sum divisible by 3. The primes in [10, 30] are: 11, 13, 17, 19, 23, 29 \u2014 none divisible by 3. So if (c) holds, (d) is automatic. We just need: digit sum is prime.\n\n**Counting subsets by sum**\n\nUse the symmetry {a,b,c,d} \u2194 {10\u2212d, 10\u2212c, 10\u2212b, 10\u2212a}, which maps sum s to sum 40\u2212s. So count(s) = count(40\u2212s). I'll enumerate the smaller sums:\n\n**Sum = 11**: a+b+c+d = 11.\n- {1,2,3,5} \u2713\nCount: **1**\n\n**Sum = 13**: a+b+c+d = 13.\n- {1,2,3,7}, {1,2,4,6}, {1,3,4,5}\nCount: **3**\n\n**Sum = 17**: a+b+c+d = 17.\n- a=1: {1,2,5,9}, {1,2,6,8}, {1,3,4,9}, {1,3,5,8}, {1,3,6,7}, {1,4,5,7}\n- a=2: {2,3,4,8}, {2,3,5,7}, {2,4,5,6}\nCount: **9**\n\n**Sum = 19**: a+b+c+d = 19.\n- a=1: {1,2,7,9}, {1,3,6,9}, {1,3,7,8}, {1,4,5,9}, {1,4,6,8}, {1,5,6,7}\n- a=2: {2,3,5,9}, {2,3,6,8}, {2,4,5,8}, {2,4,6,7}\n- a=3: {3,4,5,7}\nCount: **11**\n\n**Sum = 23**: by symmetry = count(40\u221223) = count(17) = **9**\n\n**Sum = 29**: by symmetry = count(40\u221229) = count(11) = **1**\n\n**Verifying sum = 23 via complement** (sanity check): Each sum-17 subset {a,b,c,d} maps to {10\u2212d,...,10\u2212a}: e.g., {1,2,5,9}\u2192{1,5,8,9} (sum 23 \u2713), {2,4,5,6}\u2192{4,5,6,8} (sum 23 \u2713). All 9 transform correctly.\n\n**Verifying sum = 29**: complement of {1,2,3,5} is {5,7,8,9}, sum = 29 \u2713.\n\n**Total**\n\n1 + 3 + 9 + 11 + 9 + 1 = 34.\n\nEach subset corresponds uniquely to a valid n (digits arranged increasingly, so 1000 \u2264 n \u2264 9999 \u2014 condition (a) auto-satisfied since leading digit \u2265 1).\n\nAnswer:\n34",
+  "stop_reason": "end_turn",
+  "session_id": "<redacted-session_id>",
+  "total_cost_usd": 0.289802,
+  "usage": {
+    "input_tokens": 6,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 25344,
+    "output_tokens": 11084,
+    "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+    },
+    "service_tier": "standard",
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 0,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "inference_geo": "",
+    "iterations": [
+      {
+        "input_tokens": 6,
+        "output_tokens": 11084,
+        "cache_read_input_tokens": 25344,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 0
+        },
+        "type": "message"
+      }
+    ],
+    "speed": "standard"
+  },
+  "modelUsage": {
+    "claude-opus-4-7": {
+      "inputTokens": 6,
+      "outputTokens": 11084,
+      "cacheReadInputTokens": 25344,
+      "cacheCreationInputTokens": 0,
+      "webSearchRequests": 0,
+      "costUSD": 0.289802,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 64000
+    }
+  },
+  "permission_denials": [],
+  "terminal_reason": "completed",
+  "fast_mode_state": "off",
+  "uuid": "<redacted-uuid>"
+}
