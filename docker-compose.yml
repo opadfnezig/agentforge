@@ -35,13 +35,15 @@ services:
       - DATABASE_URL=postgres://agentforge:${POSTGRES_PASSWORD:-secret}@postgres:5432/agentforge
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - PORT=3001
-      - FRONTEND_URL=http://172.16.5.10:3000
+      - FRONTEND_URL=http://172.16.5.10:80
       - DATA_DIR=/data
+      - ORACLE_STATE_DIR=/ntfr/data/oracles
       - DOCKER_SOCKET=/var/run/docker.sock
       - AGENT_IMAGE=agentforge/claude-agent:latest
       - NODE_ENV=development
     volumes:
       - ./data:/data
+      - /ntfr/data:/ntfr/data
       - /var/run/docker.sock:/var/run/docker.sock
       - /var/lib/agentforge-creds/credentials.json:/home/appuser/.claude/.credentials.json:ro
       - /var/lib/agentforge-creds/claude.json:/home/appuser/.claude.json:ro
@@ -66,7 +68,7 @@ services:
     environment:
       - BACKEND_URL=http://backend:3001
     ports:
-      - "3000:3000"
+      - "80:3000"
     depends_on:
       - backend
     networks:
