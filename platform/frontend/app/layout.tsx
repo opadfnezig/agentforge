@@ -33,6 +33,7 @@ export default function RootLayout({
               <a href="/coordinator" className="text-sm text-zinc-400 hover:text-white transition-colors">Coordinator</a>
               <a href="/oracles" className="text-sm text-zinc-400 hover:text-white transition-colors">Oracles</a>
               <a href="/developers" className="text-sm text-zinc-400 hover:text-white transition-colors">Developers</a>
+              <a href="/spawners" className="text-sm text-zinc-400 hover:text-white transition-colors">Spawners</a>
               <a href="/projects" className="text-sm text-zinc-400 hover:text-white transition-colors">Projects</a>
             </div>
           </nav>

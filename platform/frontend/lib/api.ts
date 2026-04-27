@@ -464,6 +464,86 @@ export interface DeveloperLog {
   data: Record<string, unknown>
 }
 
+// Spawner hosts
+// -----------------------------------------------------------------------------
+// Matches the backend surface at /api/spawners (created in commit 376d539).
+// The `// STUB` methods rely on backend endpoints that are NOT yet wired —
+// they're scaffolded here so the coordinator UI compiles and so the next
+// backend dispatch knows the shape the frontend assumes. See
+// docs/clarify/spawner-frontend-clarify-*.md §3 (A2-A5).
+
+export interface SpawnerHost {
+  id: string
+  hostId: string
+  name: string
+  baseUrl: string
+  status: 'unknown' | 'online' | 'offline' | 'error'
+  version: string | null
+  capabilities: string[]
+  lastSeenAt: string | null
+  lastEventAt: string | null
+  lastError: string | null
+  config: Record<string, unknown>
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CreateSpawnerHost {
+  hostId: string
+  name: string
+  baseUrl: string
+  config?: Record<string, unknown>
+}
+
+export interface UpdateSpawnerHost {
+  name?: string
+  baseUrl?: string
+  config?: Record<string, unknown>
+}
+
+export interface Spawn {
+  id: string
+  spawnerHostId: string
+  primitiveName: string
+  primitiveKind: 'developer' | 'researcher' | 'oracle'
+  state: 'creating' | 'running' | 'crashed' | 'destroyed' | 'orphaned'
+  prevState: 'creating' | 'running' | 'crashed' | 'destroyed' | 'orphaned' | null
+  lastEventId: string | null
+  lastEventAt: string
+  payload: Record<string, unknown>
+  createdAt: string
+  updatedAt: string
+}
+
+export type ProbeResult =
+  | { status: 'online'; version: string; capabilities: string[]; primitiveCount: number; latencyMs: number }
+  | { status: 'offline'; reason: string }
+  | { status: 'error'; httpStatus: number; reason: string }
+
+export const spawnersApi = {
+  list: () => fetchAPI<SpawnerHost[]>('/spawners'),
+  get: (id: string) => fetchAPI<SpawnerHost>(`/spawners/${id}`),
+  create: (data: CreateSpawnerHost) =>
+    fetchAPI<SpawnerHost>('/spawners', { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: string, data: UpdateSpawnerHost) =>
+    fetchAPI<SpawnerHost>(`/spawners/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  delete: (id: string) => fetchAPI<void>(`/spawners/${id}`, { method: 'DELETE' }),
+  probe: (id: string) => fetchAPI<ProbeResult>(`/spawners/${id}/probe`, { method: 'POST' }),
+  listSpawns: (id: string) => fetchAPI<Spawn[]>(`/spawners/${id}/spawns`),
+
+  // STUB — backend endpoint pending. Frontend SpawnBadge polls this for live state.
+  getSpawn: (id: string, primitiveName: string) =>
+    fetchAPI<Spawn>(`/spawners/${id}/spawns/${primitiveName}`),
+
+  // STUB — backend dispatch pending. Approval flow for [spawn, ...] commands.
+  approveSpawn: (id: string, spawnIntentId: string) =>
+    fetchAPI<Spawn>(`/spawners/${id}/spawn-intents/${spawnIntentId}/approve`, { method: 'POST' }),
+
+  // STUB — backend dispatch pending.
+  cancelSpawn: (id: string, spawnIntentId: string) =>
+    fetchAPI<Spawn>(`/spawners/${id}/spawn-intents/${spawnIntentId}/cancel`, { method: 'POST' }),
+}
+
 // Developers
 export const developersApi = {
   list: () => fetchAPI<Developer[]>('/developers'),

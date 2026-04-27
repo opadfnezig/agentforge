@@ -5,7 +5,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Button } from '@/components/ui/button'
 import { useToast } from '@/components/ui/toaster'
-import { developersApi, type DeveloperRun } from '@/lib/api'
+import { developersApi, spawnersApi, type DeveloperRun, type Spawn } from '@/lib/api'
 
 interface Chat {
   id: string
@@ -38,6 +38,22 @@ interface ReadInfo {
   report: string
 }
 
+// Streamed when the assistant emits a [spawn, ...] block. Frontend stays
+// rendering-only until the backend coordinator service actually emits these
+// events; for now no `type: 'spawn'` events arrive from the SSE stream so the
+// SpawnBadge never renders. Shape documented in
+// docs/clarify/spawner-frontend-clarify-*.md §2.1.
+interface SpawnInfo {
+  spawnerHostId: string
+  hostId: string
+  primitiveName: string
+  primitiveKind: 'developer' | 'researcher' | 'oracle'
+  image: string
+  spawnIntentId: string
+  pending?: boolean
+  queued?: boolean
+}
+
 interface Message {
   id?: string
   role: 'user' | 'assistant' | 'system'
@@ -45,6 +61,7 @@ interface Message {
   oracles?: OracleResponse[]
   dispatches?: DispatchInfo[]
   reads?: ReadInfo[]
+  spawns?: SpawnInfo[]
   status?: string
 }
 
@@ -60,15 +77,17 @@ const DRAFT_KEY_PREFIX = 'agentforge:coordinator:draft:'
 const DRAFT_DEBOUNCE_MS = 250
 const draftKeyFor = (chatId: string) => `${DRAFT_KEY_PREFIX}${chatId}`
 
-// Strip oracle/dispatch/read-data sentinels (HTML comment)
+// Strip oracle/dispatch/read/spawn-data sentinels (HTML comment)
 const ORACLE_SENTINEL_REGEX = /\n*<!--ORACLES:[\s\S]*?:ORACLES-->\s*$/
 const DISPATCH_SENTINEL_REGEX = /\n*<!--DISPATCHES:[\s\S]*?:DISPATCHES-->\s*$/g
 const READ_SENTINEL_REGEX = /\n*<!--READS:[\s\S]*?:READS-->\s*$/g
+const SPAWN_SENTINEL_REGEX = /\n*<!--SPAWNS:[\s\S]*?:SPAWNS-->\s*$/g
 const stripSentinel = (text: string): string =>
   text
     .replace(ORACLE_SENTINEL_REGEX, '')
     .replace(DISPATCH_SENTINEL_REGEX, '')
     .replace(READ_SENTINEL_REGEX, '')
+    .replace(SPAWN_SENTINEL_REGEX, '')
 
 export default function CoordinatorPage() {
   const [chats, setChats] = useState<Chat[]>([])
@@ -107,11 +126,17 @@ export default function CoordinatorPage() {
         if (readMatch) {
           try { reads = JSON.parse(readMatch[1]) as ReadInfo[] } catch { /* ignore */ }
         }
+        let spawns: SpawnInfo[] | undefined
+        const spawnMatch = content.match(/<!--SPAWNS:([\s\S]*?):SPAWNS-->/)
+        if (spawnMatch) {
+          try { spawns = JSON.parse(spawnMatch[1]) as SpawnInfo[] } catch { /* ignore */ }
+        }
         content = content
           .replace(/\n*<!--ORACLES:[\s\S]*?:ORACLES-->\s*/g, '')
           .replace(/\n*<!--DISPATCHES:[\s\S]*?:DISPATCHES-->\s*/g, '')
           .replace(/\n*<!--READS:[\s\S]*?:READS-->\s*/g, '')
-        return { id: m.id, role: 'assistant', content, oracles, dispatches, reads }
+          .replace(/\n*<!--SPAWNS:[\s\S]*?:SPAWNS-->\s*/g, '')
+        return { id: m.id, role: 'assistant', content, oracles, dispatches, reads, spawns }
       })
       setMessages(restored)
       setActiveChatId(id)
@@ -231,7 +256,7 @@ export default function CoordinatorPage() {
     const assistantIdx = { current: -1 }
     setMessages(prev => {
       assistantIdx.current = prev.length
-      return [...prev, { role: 'assistant', content: '', oracles: [], dispatches: [], reads: [], status: '' }]
+      return [...prev, { role: 'assistant', content: '', oracles: [], dispatches: [], reads: [], spawns: [], status: '' }]
     })
 
     try {
@@ -254,6 +279,7 @@ export default function CoordinatorPage() {
       let accOracles: OracleResponse[] = []
       let accDispatches: DispatchInfo[] = []
       let accReads: ReadInfo[] = []
+      let accSpawns: SpawnInfo[] = []
       let currentStatus = ''
 
       // Coalesce bursts of stream chunks into a single setState per frame.
@@ -273,6 +299,7 @@ export default function CoordinatorPage() {
               oracles: accOracles,
               dispatches: accDispatches,
               reads: accReads,
+              spawns: accSpawns,
               status: currentStatus,
             }
           }
@@ -341,6 +368,23 @@ export default function CoordinatorPage() {
               currentStatus = event.found
                 ? `Read run ${String(event.runId).slice(0, 8)} (${event.status})`
                 : `Read run ${String(event.runId).slice(0, 8)} not found`
+              schedule()
+            } else if (event.type === 'spawn') {
+              accSpawns = [...accSpawns, {
+                spawnerHostId: event.spawnerHostId,
+                hostId: event.hostId,
+                primitiveName: event.primitiveName,
+                primitiveKind: event.primitiveKind,
+                image: event.image,
+                spawnIntentId: event.spawnIntentId,
+                pending: !!event.pending,
+                queued: !!event.queued,
+              }]
+              currentStatus = event.pending
+                ? `Awaiting approval: spawn ${event.primitiveName}`
+                : event.queued
+                ? `Queued spawn ${event.primitiveName}`
+                : `Spawning ${event.primitiveName}`
               schedule()
             } else if (event.type === 'text') {
               accText += event.text
@@ -559,6 +603,15 @@ const MessageRow = memo(function MessageRow({ message: msg, isLast, loading, onR
         <div className="mb-2 space-y-1">
           {msg.reads.map((r, j) => (
             <ReadBlock key={`${r.runId}-${j}`} read={r} />
+          ))}
+        </div>
+      )}
+
+      {/* Spawn badges — assistant emitted a [spawn, ...] block */}
+      {msg.spawns && msg.spawns.length > 0 && (
+        <div className="mb-2 space-y-1">
+          {msg.spawns.map((s) => (
+            <SpawnBadge key={s.spawnIntentId} spawn={s} />
           ))}
         </div>
       )}
@@ -1015,6 +1068,198 @@ const DispatchBadge = memo(function DispatchBadge({ dispatch }: { dispatch: Disp
             </details>
           )}
         </div>
+      </div>
+    </details>
+  )
+})
+
+// Renders a single [spawn, ...] command emitted by the assistant. Mirrors
+// DispatchBadge's structure with simpler semantics (no edit, no retry) — a
+// destroyed/crashed spawn is restarted via a fresh [spawn, ...] block, not by
+// retrying this badge. Stays inert until the backend coordinator emits
+// `event.type === 'spawn'`. The `// STUB` API methods 404 today; backend
+// dispatch pending — see docs/clarify/spawner-frontend-clarify-*.md §3 (A4).
+const SPAWN_TERMINAL_STATES = new Set<Spawn['state']>(['destroyed'])
+const SPAWN_DEAD_STATES = new Set<Spawn['state']>(['crashed', 'orphaned'])
+
+const SpawnBadge = memo(function SpawnBadge({ spawn }: { spawn: SpawnInfo }) {
+  const [live, setLive] = useState<Spawn | null>(null)
+  const [actionBusy, setActionBusy] = useState<null | 'approve' | 'cancel'>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const [cancelled, setCancelled] = useState(false)
+
+  // Poll for the current spawn state. Only starts once the spawn has been
+  // approved (i.e. spawner has actually been asked to create the primitive).
+  // While `pending`/`queued` we have nothing to poll for — the row only
+  // appears in the spawns table after the spawner returns.
+  useEffect(() => {
+    if (spawn.pending || spawn.queued || cancelled) return
+    let cancelledFlag = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const tick = async () => {
+      try {
+        const s = await spawnersApi.getSpawn(spawn.spawnerHostId, spawn.primitiveName)
+        if (cancelledFlag) return
+        setLive(s)
+        if (
+          !SPAWN_TERMINAL_STATES.has(s.state) &&
+          !SPAWN_DEAD_STATES.has(s.state)
+        ) {
+          timer = setTimeout(tick, 2000)
+        }
+      } catch {
+        if (!cancelledFlag) timer = setTimeout(tick, 4000)
+      }
+    }
+    tick()
+    return () => {
+      cancelledFlag = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [spawn.spawnerHostId, spawn.primitiveName, spawn.pending, spawn.queued, cancelled])
+
+  const derivedState: string = cancelled
+    ? 'cancelled'
+    : live
+    ? live.state
+    : spawn.pending
+    ? 'pending'
+    : spawn.queued
+    ? 'queued'
+    : 'creating'
+
+  const isPending = derivedState === 'pending'
+
+  const stateColor: Record<string, string> = {
+    pending: 'text-amber-400',
+    queued: 'text-zinc-400',
+    creating: 'text-yellow-400',
+    running: 'text-blue-400',
+    crashed: 'text-red-400',
+    orphaned: 'text-red-400',
+    destroyed: 'text-zinc-500',
+    cancelled: 'text-zinc-400',
+  }
+
+  const approve = async () => {
+    setActionBusy('approve')
+    setActionError(null)
+    try {
+      await spawnersApi.approveSpawn(spawn.spawnerHostId, spawn.spawnIntentId)
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Approve failed')
+    } finally {
+      setActionBusy(null)
+    }
+  }
+
+  const cancel = async () => {
+    if (!confirm('Cancel this spawn? The primitive will not be created.')) return
+    setActionBusy('cancel')
+    setActionError(null)
+    try {
+      await spawnersApi.cancelSpawn(spawn.spawnerHostId, spawn.spawnIntentId)
+      setCancelled(true)
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Cancel failed')
+    } finally {
+      setActionBusy(null)
+    }
+  }
+
+  const shortImage = (img: string): string => {
+    if (img.length <= 40) return img
+    const lastColon = img.lastIndexOf(':')
+    if (lastColon > 0 && img.length - lastColon < 25) {
+      return `…${img.slice(-(40 - 1))}`
+    }
+    return `${img.slice(0, 38)}…`
+  }
+
+  return (
+    <details className="bg-zinc-900 border border-zinc-800 rounded text-xs" open={isPending}>
+      <summary className="px-3 py-1.5 cursor-pointer text-zinc-400 hover:text-zinc-200 flex items-center gap-2 flex-wrap">
+        <span>Spawn:</span>
+        <span className="font-medium text-violet-400">{spawn.primitiveName}</span>
+        <span className="px-1 py-0.5 rounded bg-zinc-800 text-zinc-400 font-mono">{spawn.primitiveKind}</span>
+        <span className={`font-medium ${stateColor[derivedState] || 'text-zinc-400'}`}>{derivedState}</span>
+        <span className="text-zinc-500 font-mono text-[10px]">@ {spawn.hostId}</span>
+        <span
+          className="text-zinc-500 font-mono text-[10px] truncate max-w-[16rem]"
+          title={spawn.image}
+        >
+          {shortImage(spawn.image)}
+        </span>
+        <a
+          href={`/spawners/${spawn.spawnerHostId}`}
+          className="text-zinc-500 hover:text-zinc-300 underline-offset-2 hover:underline ml-auto"
+          onClick={(e) => e.stopPropagation()}
+        >
+          view host
+        </a>
+      </summary>
+      <div className="border-t border-zinc-800 divide-y divide-zinc-800 max-h-[24rem] overflow-y-auto">
+        {isPending && (
+          <div className="px-3 py-2 bg-amber-950/20">
+            <div className="text-[10px] uppercase tracking-wide text-amber-400 mb-1">
+              Awaiting your approval
+            </div>
+            <div className="text-zinc-300">
+              Approve to spawn <span className="text-violet-400">{spawn.primitiveName}</span> ({spawn.primitiveKind}) on <span className="text-zinc-200">{spawn.hostId}</span>. Cancel skips the spawn entirely.
+            </div>
+            <div className="flex gap-2 mt-2 items-center" onClick={(e) => e.stopPropagation()}>
+              <button
+                type="button"
+                onClick={approve}
+                disabled={!!actionBusy}
+                className="px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {actionBusy === 'approve' ? 'Approving…' : 'Approve'}
+              </button>
+              <button
+                type="button"
+                onClick={cancel}
+                disabled={!!actionBusy}
+                className="px-2 py-1 rounded bg-red-900 hover:bg-red-800 text-white text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {actionBusy === 'cancel' ? 'Cancelling…' : 'Cancel'}
+              </button>
+              {actionError && <span className="text-red-400 text-[11px]">{actionError}</span>}
+            </div>
+          </div>
+        )}
+
+        <div className="px-3 py-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px]">
+          <span className="text-zinc-500">host_id</span>
+          <span className="font-mono text-zinc-300">{spawn.hostId}</span>
+          <span className="text-zinc-500">primitive</span>
+          <span className="font-mono text-zinc-300">{spawn.primitiveName} <span className="text-zinc-500">({spawn.primitiveKind})</span></span>
+          <span className="text-zinc-500">image</span>
+          <span className="font-mono text-zinc-300 break-all">{spawn.image}</span>
+          {live?.lastEventAt && (
+            <>
+              <span className="text-zinc-500">last_event_at</span>
+              <span className="font-mono text-zinc-300">{new Date(live.lastEventAt).toISOString()}</span>
+            </>
+          )}
+          {live?.prevState && (
+            <>
+              <span className="text-zinc-500">prev_state</span>
+              <span className="font-mono text-zinc-400">{live.prevState}</span>
+            </>
+          )}
+        </div>
+
+        {SPAWN_DEAD_STATES.has(derivedState as Spawn['state']) && live?.payload && (
+          <div className="px-3 py-2 bg-red-950/20">
+            <div className="text-[10px] uppercase tracking-wide text-red-400 mb-1">
+              {derivedState === 'crashed' ? 'Crashed' : 'Orphaned'}
+            </div>
+            <pre className="text-red-300 whitespace-pre-wrap break-words font-mono text-[11px]">
+              {JSON.stringify(live.payload, null, 2)}
+            </pre>
+          </div>
+        )}
       </div>
     </details>
   )
