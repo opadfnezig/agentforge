@@ -221,3 +221,46 @@ export interface DbDeveloperLog {
   event_type: string
   data: Record<string, unknown> | string
 }
+
+export interface DbSpawnerHost {
+  id: string
+  host_id: string
+  name: string
+  base_url: string
+  status: string
+  version: string | null
+  capabilities: string[] | string
+  last_seen_at: Date | string | null
+  last_event_at: Date | string | null
+  last_error: string | null
+  config: Record<string, unknown> | string
+  created_at: Date
+  updated_at: Date
+}
+
+export interface DbSpawn {
+  id: string
+  spawner_host_id: string
+  primitive_name: string
+  primitive_kind: string
+  state: string
+  prev_state: string | null
+  last_event_id: string | null
+  last_event_at: Date | string
+  payload: Record<string, unknown> | string
+  created_at: Date
+  updated_at: Date
+}
+
+export interface DbSpawnEvent {
+  id: string
+  spawner_host_id: string
+  event_id: string
+  primitive_name: string
+  primitive_kind: string
+  state: string
+  prev_state: string | null
+  event_timestamp: Date | string
+  payload: Record<string, unknown> | string
+  received_at: Date | string
+}

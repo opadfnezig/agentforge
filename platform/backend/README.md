@@ -99,6 +99,7 @@ External services: Postgres (prod) or SQLite file (dev), Docker daemon via socke
 | `/api/oracles` | `routes/oracles-routes.ts` | Oracles list/CRUD, `state`, `query`, `queries` |
 | `/api/coordinator` | `routes/coordinator-routes.ts` | SSE coordinator chat (`text/event-stream`) |
 | `/api/developers` | `routes/developers-routes.ts` | Developers CRUD, `secret`, `dispatch`, `runs`, `runs/:id/logs` |
+| `/api/spawners` | `routes/spawners-routes.ts` | Spawner-host registry, `probe`, `spawns`, lifecycle event ingest at `:hostId/events` |
 | `/health` | inline | Liveness probe |
 
 Error envelope: `{ error: { message, code } }` with HTTP status from `AppError` (see `utils/error-handler.ts`).
@@ -131,6 +132,7 @@ All request/response shapes are defined as Zod schemas in `src/schemas/` and inf
 - `schemas/oracle.ts` — `Oracle`, status `active|inactive|error`.
 - `schemas/scope.ts` — `Scope` (name, description, path).
 - `schemas/developer.ts` — `Developer`, `DeveloperRun`, `DeveloperLog`, status (`offline|idle|busy|error`), run mode (`implement|clarify`), run status (`pending|running|success|failure|cancelled|no_changes`), `Dispatch`.
+- `schemas/spawner.ts` — `SpawnerHost` (status `unknown|online|offline|error`), `LifecycleEvent` (states `creating|running|crashed|destroyed|orphaned`, kinds `developer|researcher|oracle`), `SpawnSpec` (mirrors `spawner/src/lib/types.ts`).
 - `schemas/api.ts` — `Pagination`, `CreateTask`, `ChatMessage`, `StartEditor`, `DagValidation` (error types: `cycle|orphan|missing_start|missing_end|invalid_edge`).
 
 ### Database schema
@@ -141,6 +143,8 @@ Defined by Knex migrations under `src/db/migrations/`:
 - `003_oracle_builder_coordinator.ts` — oracles, oracle_queries, coordinator tables.
 - `004_coordinator_chats.ts` — coordinator chat persistence.
 - `004_developers.ts` — developers, developer_runs, developer_logs.
+- `005`–`009` — additive columns/indexes on `developer_runs` (trailer/queue, push status, approval, resume context).
+- `010_spawner_hosts.ts` — `spawner_hosts`, `spawns`, `spawn_events`. New tables for the spawner integration; do NOT cross-reference `developers` (intentionally disjoint per Ambiguity A4 in `docs/clarify/spawner-backend-clarify-*.md`).
 
 Query helpers in `src/db/queries/` wrap Knex and return typed rows matching the Zod schemas above.
 

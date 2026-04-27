@@ -20,6 +20,7 @@ import { scopesRouter } from './routes/scopes.js'
 import { oraclesRouter } from './routes/oracles-routes.js'
 import { coordinatorRouter } from './routes/coordinator-routes.js'
 import { developersRouter, registerDeveloperWs } from './routes/developers-routes.js'
+import { spawnersRouter } from './routes/spawners-routes.js'
 
 const app: ReturnType<typeof express> = express()
 const wsInstance = expressWs(app)
@@ -51,6 +52,7 @@ app.use('/api/oracles', oraclesRouter)
 app.use('/api/coordinator', coordinatorRouter)
 app.use('/api/developers', developersRouter)
 registerDeveloperWs(app as any)
+app.use('/api/spawners', spawnersRouter)
 
 // Error handler
 app.use(errorHandler)
