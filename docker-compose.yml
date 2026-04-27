@@ -82,29 +82,6 @@ services:
     container_name: agentforge-agent-builder
     command: echo "Agent image built successfully"
 
-  # Developer — standalone process that runs Claude Code on dispatch
-  developer:
-    build:
-      context: ./developer
-      dockerfile: Dockerfile
-    container_name: agentforge-developer
-    environment:
-      - COORDINATOR_URL=ws://backend:3001
-      - DEVELOPER_ID=${DEVELOPER_ID:-}
-      - DEVELOPER_SECRET=${DEVELOPER_SECRET:-}
-      - WORKSPACE_PATH=/workspace
-      - GIT_BRANCH=main
-    volumes:
-      - /home/user/agentforge:/workspace
-      - /var/lib/agentforge-creds/credentials.json:/home/agent/.claude/.credentials.json:ro
-      - /var/lib/agentforge-creds/claude.json:/home/agent/.claude.json:ro
-      - ~/.ssh:/mnt/ssh-src:ro
-    depends_on:
-      - backend
-    networks:
-      - agentforge-net
-    restart: unless-stopped
-
 volumes:
   postgres_data:
 
