@@ -30,8 +30,28 @@ set +a
 : "${NTFR_HOST_ID:?NTFR_HOST_ID must be set in .env}"
 : "${NTFR_HOST_WORKDIR:?NTFR_HOST_WORKDIR must be set in .env}"
 
-# Make sure the host workdir exists and is writable.
+# Make sure the host workdir exists and is owned by the in-container ntfr
+# user (uid/gid 10001). The spawner runs as ntfr inside the container and
+# bind-mounts ${NTFR_HOST_WORKDIR} -> /ntfr; without matching ownership it
+# can't write spawner.log, state.db, primitive folders, etc.
+#
+# Override with NTFR_UID / NTFR_GID if you've remapped the in-container uid.
+NTFR_UID="${NTFR_UID:-10001}"
+NTFR_GID="${NTFR_GID:-10001}"
+
 mkdir -p "${NTFR_HOST_WORKDIR}/.spawner" "${NTFR_HOST_WORKDIR}/.archive"
+
+if [[ $EUID -eq 0 ]]; then
+  chown -R "${NTFR_UID}:${NTFR_GID}" "${NTFR_HOST_WORKDIR}"
+  chmod 755 "${NTFR_HOST_WORKDIR}"
+else
+  current_uid=$(stat -c '%u' "${NTFR_HOST_WORKDIR}")
+  if [[ "${current_uid}" != "${NTFR_UID}" ]]; then
+    echo "WARN: ${NTFR_HOST_WORKDIR} is owned by uid ${current_uid}, expected ${NTFR_UID}." >&2
+    echo "      Run as root (or sudo) to chown, or do it manually:" >&2
+    echo "      sudo chown -R ${NTFR_UID}:${NTFR_GID} ${NTFR_HOST_WORKDIR}" >&2
+  fi
+fi
 
 # Auto-detect docker GID if not pinned.
 if [[ -z "${NTFR_DOCKER_GID:-}" ]] || [[ "${NTFR_DOCKER_GID}" == "998" ]]; then
