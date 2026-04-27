@@ -47,7 +47,7 @@ interface SpawnInfo {
   spawnerHostId: string
   hostId: string
   primitiveName: string
-  primitiveKind: 'developer' | 'researcher' | 'oracle'
+  primitiveKind: 'developer' | 'researcher'
   image: string
   spawnIntentId: string
   pending?: boolean
@@ -1076,9 +1076,10 @@ const DispatchBadge = memo(function DispatchBadge({ dispatch }: { dispatch: Disp
 // Renders a single [spawn, ...] command emitted by the assistant. Mirrors
 // DispatchBadge's structure with simpler semantics (no edit, no retry) — a
 // destroyed/crashed spawn is restarted via a fresh [spawn, ...] block, not by
-// retrying this badge. Stays inert until the backend coordinator emits
-// `event.type === 'spawn'`. The `// STUB` API methods 404 today; backend
-// dispatch pending — see docs/clarify/spawner-frontend-clarify-*.md §3 (A4).
+// retrying this badge. Drives the approval flow against
+// /api/spawners/:id/spawn-intents/:intentId; once approved, polls
+// /api/spawners/:id/spawns/:primitiveName until the primitive reaches a
+// terminal state.
 const SPAWN_TERMINAL_STATES = new Set<Spawn['state']>(['destroyed'])
 const SPAWN_DEAD_STATES = new Set<Spawn['state']>(['crashed', 'orphaned'])
 
@@ -1086,14 +1087,15 @@ const SpawnBadge = memo(function SpawnBadge({ spawn }: { spawn: SpawnInfo }) {
   const [live, setLive] = useState<Spawn | null>(null)
   const [actionBusy, setActionBusy] = useState<null | 'approve' | 'cancel'>(null)
   const [actionError, setActionError] = useState<string | null>(null)
-  const [cancelled, setCancelled] = useState(false)
+  const [intentStatus, setIntentStatus] = useState<'pending' | 'approved' | 'cancelled' | 'failed'>(
+    spawn.pending ? 'pending' : spawn.queued ? 'pending' : 'approved'
+  )
 
-  // Poll for the current spawn state. Only starts once the spawn has been
-  // approved (i.e. spawner has actually been asked to create the primitive).
-  // While `pending`/`queued` we have nothing to poll for — the row only
-  // appears in the spawns table after the spawner returns.
+  // Once approved, poll the spawn row until it reaches a terminal/dead state.
+  // The row only exists after the spawner has returned successfully — until
+  // then the GET 404s and we just back off.
   useEffect(() => {
-    if (spawn.pending || spawn.queued || cancelled) return
+    if (intentStatus !== 'approved') return
     let cancelledFlag = false
     let timer: ReturnType<typeof setTimeout> | null = null
     const tick = async () => {
@@ -1116,17 +1118,18 @@ const SpawnBadge = memo(function SpawnBadge({ spawn }: { spawn: SpawnInfo }) {
       cancelledFlag = true
       if (timer) clearTimeout(timer)
     }
-  }, [spawn.spawnerHostId, spawn.primitiveName, spawn.pending, spawn.queued, cancelled])
+  }, [spawn.spawnerHostId, spawn.primitiveName, intentStatus])
 
-  const derivedState: string = cancelled
-    ? 'cancelled'
-    : live
-    ? live.state
-    : spawn.pending
-    ? 'pending'
-    : spawn.queued
-    ? 'queued'
-    : 'creating'
+  const derivedState: string =
+    intentStatus === 'cancelled'
+      ? 'cancelled'
+      : intentStatus === 'failed'
+      ? 'failed'
+      : live
+      ? live.state
+      : intentStatus === 'pending'
+      ? 'pending'
+      : 'creating'
 
   const isPending = derivedState === 'pending'
 
@@ -1139,6 +1142,7 @@ const SpawnBadge = memo(function SpawnBadge({ spawn }: { spawn: SpawnInfo }) {
     orphaned: 'text-red-400',
     destroyed: 'text-zinc-500',
     cancelled: 'text-zinc-400',
+    failed: 'text-red-400',
   }
 
   const approve = async () => {
@@ -1146,8 +1150,10 @@ const SpawnBadge = memo(function SpawnBadge({ spawn }: { spawn: SpawnInfo }) {
     setActionError(null)
     try {
       await spawnersApi.approveSpawn(spawn.spawnerHostId, spawn.spawnIntentId)
+      setIntentStatus('approved')
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Approve failed')
+      setIntentStatus('failed')
     } finally {
       setActionBusy(null)
     }
@@ -1159,7 +1165,7 @@ const SpawnBadge = memo(function SpawnBadge({ spawn }: { spawn: SpawnInfo }) {
     setActionError(null)
     try {
       await spawnersApi.cancelSpawn(spawn.spawnerHostId, spawn.spawnIntentId)
-      setCancelled(true)
+      setIntentStatus('cancelled')
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Cancel failed')
     } finally {

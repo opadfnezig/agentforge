@@ -264,3 +264,18 @@ export interface DbSpawnEvent {
   payload: Record<string, unknown> | string
   received_at: Date | string
 }
+
+export interface DbSpawnIntent {
+  id: string
+  spawner_host_id: string
+  primitive_name: string
+  primitive_kind: string
+  image: string
+  spec: Record<string, unknown> | string
+  status: string
+  error_message: string | null
+  approved_at: Date | string | null
+  cancelled_at: Date | string | null
+  created_at: Date
+  updated_at: Date
+}

@@ -466,11 +466,17 @@ export interface DeveloperLog {
 
 // Spawner hosts
 // -----------------------------------------------------------------------------
-// Matches the backend surface at /api/spawners (created in commit 376d539).
-// The `// STUB` methods rely on backend endpoints that are NOT yet wired —
-// they're scaffolded here so the coordinator UI compiles and so the next
-// backend dispatch knows the shape the frontend assumes. See
-// docs/clarify/spawner-frontend-clarify-*.md §3 (A2-A5).
+// Backend surface lives at /api/spawners. Spawn intents (the approval queue
+// for [spawn, ...] coordinator commands) live at
+// /api/spawners/:id/spawn-intents/:intentId.
+
+export type PrimitiveKind = 'developer' | 'researcher'
+export type PrimitiveState =
+  | 'creating'
+  | 'running'
+  | 'crashed'
+  | 'destroyed'
+  | 'orphaned'
 
 export interface SpawnerHost {
   id: string
@@ -505,14 +511,45 @@ export interface Spawn {
   id: string
   spawnerHostId: string
   primitiveName: string
-  primitiveKind: 'developer' | 'researcher' | 'oracle'
-  state: 'creating' | 'running' | 'crashed' | 'destroyed' | 'orphaned'
-  prevState: 'creating' | 'running' | 'crashed' | 'destroyed' | 'orphaned' | null
+  primitiveKind: PrimitiveKind
+  state: PrimitiveState
+  prevState: PrimitiveState | null
   lastEventId: string | null
   lastEventAt: string
   payload: Record<string, unknown>
   createdAt: string
   updatedAt: string
+}
+
+export interface SpawnIntent {
+  id: string
+  spawnerHostId: string
+  primitiveName: string
+  primitiveKind: PrimitiveKind
+  image: string
+  spec: Record<string, unknown>
+  status: 'pending' | 'approved' | 'cancelled' | 'failed'
+  errorMessage: string | null
+  approvedAt: string | null
+  cancelledAt: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ApproveSpawnResult {
+  intent: SpawnIntent
+  primitive: {
+    name: string
+    kind: string
+    state: string
+    image: string
+    container_id: string | null
+    created_at: string
+    updated_at: string
+    last_event_at: string | null
+    last_event_id: string | null
+    spec: Record<string, unknown>
+  }
 }
 
 export type ProbeResult =
@@ -530,18 +567,24 @@ export const spawnersApi = {
   delete: (id: string) => fetchAPI<void>(`/spawners/${id}`, { method: 'DELETE' }),
   probe: (id: string) => fetchAPI<ProbeResult>(`/spawners/${id}/probe`, { method: 'POST' }),
   listSpawns: (id: string) => fetchAPI<Spawn[]>(`/spawners/${id}/spawns`),
-
-  // STUB — backend endpoint pending. Frontend SpawnBadge polls this for live state.
   getSpawn: (id: string, primitiveName: string) =>
     fetchAPI<Spawn>(`/spawners/${id}/spawns/${primitiveName}`),
-
-  // STUB — backend dispatch pending. Approval flow for [spawn, ...] commands.
+  listIntents: (id: string, status?: SpawnIntent['status']) =>
+    fetchAPI<SpawnIntent[]>(
+      `/spawners/${id}/spawn-intents${status ? `?status=${status}` : ''}`
+    ),
+  getIntent: (id: string, intentId: string) =>
+    fetchAPI<SpawnIntent>(`/spawners/${id}/spawn-intents/${intentId}`),
   approveSpawn: (id: string, spawnIntentId: string) =>
-    fetchAPI<Spawn>(`/spawners/${id}/spawn-intents/${spawnIntentId}/approve`, { method: 'POST' }),
-
-  // STUB — backend dispatch pending.
+    fetchAPI<ApproveSpawnResult>(
+      `/spawners/${id}/spawn-intents/${spawnIntentId}/approve`,
+      { method: 'POST' }
+    ),
   cancelSpawn: (id: string, spawnIntentId: string) =>
-    fetchAPI<Spawn>(`/spawners/${id}/spawn-intents/${spawnIntentId}/cancel`, { method: 'POST' }),
+    fetchAPI<SpawnIntent>(
+      `/spawners/${id}/spawn-intents/${spawnIntentId}/cancel`,
+      { method: 'POST' }
+    ),
 }
 
 // Developers

@@ -143,7 +143,8 @@ coordinatorRouter.post('/chats/:id/message', async (req, res, next) => {
       content: m.content
         .replace(/\n*<!--ORACLES:[\s\S]*?:ORACLES-->\s*/g, '')
         .replace(/\n*<!--DISPATCHES:[\s\S]*?:DISPATCHES-->\s*/g, '')
-        .replace(/\n*<!--READS:[\s\S]*?:READS-->\s*/g, ''),
+        .replace(/\n*<!--READS:[\s\S]*?:READS-->\s*/g, '')
+        .replace(/\n*<!--SPAWNS:[\s\S]*?:SPAWNS-->\s*/g, ''),
     }))
 
     await chatDb.addMessage(chat.id, 'user', message)
@@ -172,6 +173,16 @@ coordinatorRouter.post('/chats/:id/message', async (req, res, next) => {
       developerName: string | null
       report: string
     }[] = []
+    const collectedSpawns: {
+      spawnerHostId: string
+      hostId: string
+      primitiveName: string
+      primitiveKind: string
+      image: string
+      spawnIntentId: string
+      pending: boolean
+      queued: boolean
+    }[] = []
 
     const { text: fullText, trailer } = await run(message, history, (event) => {
       if (event.type === 'oracle') {
@@ -194,6 +205,17 @@ coordinatorRouter.post('/chats/:id/message', async (req, res, next) => {
           developerName: event.developerName,
           report: event.report,
         })
+      } else if (event.type === 'spawn') {
+        collectedSpawns.push({
+          spawnerHostId: event.spawnerHostId,
+          hostId: event.hostId,
+          primitiveName: event.primitiveName,
+          primitiveKind: event.primitiveKind,
+          image: event.image,
+          spawnIntentId: event.spawnIntentId,
+          pending: event.pending,
+          queued: event.queued,
+        })
       }
       sendSSE(res, event)
     })
@@ -209,6 +231,9 @@ coordinatorRouter.post('/chats/:id/message', async (req, res, next) => {
       }
       if (collectedReads.length > 0) {
         stored += `\n\n<!--READS:${JSON.stringify(collectedReads)}:READS-->`
+      }
+      if (collectedSpawns.length > 0) {
+        stored += `\n\n<!--SPAWNS:${JSON.stringify(collectedSpawns)}:SPAWNS-->`
       }
       // Roll up both passes into the message-level summary; second pass is the
       // user-facing one when present, else we attribute everything to the first.

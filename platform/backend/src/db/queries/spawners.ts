@@ -1,5 +1,5 @@
 import { v4 as uuid } from 'uuid'
-import { db, DbSpawnerHost, DbSpawn, DbSpawnEvent } from '../connection.js'
+import { db, DbSpawnerHost, DbSpawn, DbSpawnEvent, DbSpawnIntent } from '../connection.js'
 import {
   SpawnerHost,
   CreateSpawnerHost,
@@ -8,6 +8,9 @@ import {
   PrimitiveKind,
   PrimitiveState,
   LifecycleEvent,
+  SpawnIntent,
+  SpawnIntentStatus,
+  SpawnSpec,
 } from '../../schemas/spawner.js'
 
 const parseJson = <T>(v: T | string | null | undefined, fallback: T): T => {
@@ -243,4 +246,97 @@ export const getSpawn = async (
     .where({ spawner_host_id: spawnerHostId, primitive_name: primitiveName })
     .first()
   return row ? toSpawn(row) : null
+}
+
+// --- spawn_intents ---
+
+const toIntent = (row: DbSpawnIntent): SpawnIntent => {
+  const fallbackSpec: SpawnSpec = {
+    name: row.primitive_name,
+    kind: row.primitive_kind as SpawnIntent['primitiveKind'],
+    image: row.image,
+  }
+  let spec: SpawnSpec = fallbackSpec
+  if (row.spec) {
+    if (typeof row.spec === 'string') {
+      try {
+        spec = JSON.parse(row.spec) as SpawnSpec
+      } catch {
+        spec = fallbackSpec
+      }
+    } else {
+      spec = row.spec as unknown as SpawnSpec
+    }
+  }
+  return {
+    id: row.id,
+    spawnerHostId: row.spawner_host_id,
+    primitiveName: row.primitive_name,
+    primitiveKind: row.primitive_kind as SpawnIntent['primitiveKind'],
+    image: row.image,
+    spec,
+    status: row.status as SpawnIntentStatus,
+    errorMessage: row.error_message,
+    approvedAt: toDate(row.approved_at),
+    cancelledAt: toDate(row.cancelled_at),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+export const createSpawnIntent = async (
+  spawnerHostId: string,
+  spec: SpawnSpec
+): Promise<SpawnIntent> => {
+  const [row] = await db<DbSpawnIntent>('spawn_intents')
+    .insert({
+      id: uuid(),
+      spawner_host_id: spawnerHostId,
+      primitive_name: spec.name,
+      primitive_kind: spec.kind,
+      image: spec.image,
+      spec: JSON.stringify(spec) as unknown as Record<string, unknown>,
+      status: 'pending',
+    })
+    .returning('*')
+  return toIntent(row)
+}
+
+export const getSpawnIntent = async (id: string): Promise<SpawnIntent | null> => {
+  const row = await db<DbSpawnIntent>('spawn_intents').where({ id }).first()
+  return row ? toIntent(row) : null
+}
+
+export type IntentStatusQuery = SpawnIntentStatus
+
+export const listSpawnIntentsForHost = async (
+  spawnerHostId: string,
+  status?: SpawnIntentStatus
+): Promise<SpawnIntent[]> => {
+  let q = db<DbSpawnIntent>('spawn_intents').where({ spawner_host_id: spawnerHostId })
+  if (status) q = q.where({ status })
+  const rows = await q.orderBy('created_at', 'desc')
+  return rows.map(toIntent)
+}
+
+export const updateSpawnIntent = async (
+  id: string,
+  data: {
+    status?: SpawnIntentStatus
+    errorMessage?: string | null
+    approvedAt?: Date | null
+    cancelledAt?: Date | null
+  }
+): Promise<SpawnIntent | null> => {
+  const update: Partial<DbSpawnIntent> = {}
+  if (data.status !== undefined) update.status = data.status
+  if (data.errorMessage !== undefined) update.error_message = data.errorMessage
+  if (data.approvedAt !== undefined) update.approved_at = data.approvedAt
+  if (data.cancelledAt !== undefined) update.cancelled_at = data.cancelledAt
+
+  const [row] = await db<DbSpawnIntent>('spawn_intents')
+    .where({ id })
+    .update({ ...update, updated_at: new Date() })
+    .returning('*')
+  return row ? toIntent(row) : null
 }

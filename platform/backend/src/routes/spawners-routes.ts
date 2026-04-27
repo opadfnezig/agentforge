@@ -5,7 +5,11 @@ import {
   lifecycleEventSchema,
 } from '../schemas/spawner.js'
 import * as queries from '../db/queries/spawners.js'
-import { SpawnerClient } from '../services/spawner-client.js'
+import {
+  SpawnerClient,
+  SpawnerHttpError,
+  SpawnerTransportError,
+} from '../services/spawner-client.js'
 import { spawnerRegistry } from '../services/spawner-registry.js'
 import { AppError } from '../utils/error-handler.js'
 import { logger } from '../utils/logger.js'
@@ -132,6 +136,162 @@ spawnersRouter.get('/:id/spawns', async (req, res, next) => {
     }
     const spawns = await queries.listSpawnsForHost(host.id)
     res.json(spawns)
+  } catch (err) {
+    next(err)
+  }
+})
+
+// Single-primitive read — used by the SpawnBadge polling loop. Returns the
+// latest ingested state, or 404 if no events have arrived for this primitive.
+spawnersRouter.get('/:id/spawns/:primitiveName', async (req, res, next) => {
+  try {
+    const host = await queries.getSpawnerHost(req.params.id)
+    if (!host) {
+      throw new AppError(404, 'spawner host not found', 'SPAWNER_HOST_NOT_FOUND')
+    }
+    const spawn = await queries.getSpawn(host.id, req.params.primitiveName)
+    if (!spawn) {
+      throw new AppError(
+        404,
+        `no spawn for '${req.params.primitiveName}' on this host`,
+        'SPAWN_NOT_FOUND'
+      )
+    }
+    res.json(spawn)
+  } catch (err) {
+    next(err)
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Spawn intents — pending [spawn, ...] commands awaiting user approval.
+// Approve translates the intent into an HTTP call to the spawner; spawner's
+// in-process composeMutex serializes concurrent spawns at the host level
+// (verified in spawner/src/lib/mutex.ts + lifecycle.ts:39,110), so backend
+// fires concurrent requests without queuing locally.
+// ---------------------------------------------------------------------------
+
+// List intents for a host, filterable by status.
+spawnersRouter.get('/:id/spawn-intents', async (req, res, next) => {
+  try {
+    const host = await queries.getSpawnerHost(req.params.id)
+    if (!host) {
+      throw new AppError(404, 'spawner host not found', 'SPAWNER_HOST_NOT_FOUND')
+    }
+    const status = typeof req.query.status === 'string'
+      ? (req.query.status as queries.IntentStatusQuery)
+      : undefined
+    const intents = await queries.listSpawnIntentsForHost(host.id, status)
+    res.json(intents)
+  } catch (err) {
+    next(err)
+  }
+})
+
+// Approve a pending intent. Synchronously calls SpawnerClient.spawn() — the
+// spawner's POST /spawns is fast (bounded by `docker compose up -d`) and
+// returning the resulting Spawn row to the caller is more useful than a 202
+// fire-and-forget. On spawner error: intent is marked 'failed' with the
+// error text, and 502 is returned to the client.
+spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, next) => {
+  try {
+    const intent = await queries.getSpawnIntent(req.params.intentId)
+    if (!intent || intent.spawnerHostId !== req.params.id) {
+      throw new AppError(404, 'spawn intent not found', 'SPAWN_INTENT_NOT_FOUND')
+    }
+    if (intent.status !== 'pending') {
+      throw new AppError(
+        409,
+        `intent is ${intent.status}, only pending intents can be approved`,
+        'INTENT_NOT_PENDING'
+      )
+    }
+    const host = await queries.getSpawnerHost(req.params.id)
+    if (!host) {
+      throw new AppError(404, 'spawner host not found', 'SPAWNER_HOST_NOT_FOUND')
+    }
+
+    const client = new SpawnerClient({ baseUrl: host.baseUrl, timeoutMs: 30_000 })
+    let primitive
+    try {
+      primitive = await client.spawn(intent.spec)
+    } catch (err) {
+      const message =
+        err instanceof SpawnerHttpError
+          ? `spawner ${err.status}: ${err.bodyText.slice(0, 300)}`
+          : err instanceof SpawnerTransportError
+          ? `spawner transport: ${err.cause instanceof Error ? err.cause.message : String(err.cause)}`
+          : err instanceof Error
+          ? err.message
+          : String(err)
+      await queries.updateSpawnIntent(intent.id, {
+        status: 'failed',
+        errorMessage: message,
+      })
+      logger.warn(
+        { intentId: intent.id, hostId: host.hostId, primitive: intent.primitiveName, err: message },
+        'Spawn approval failed at spawner'
+      )
+      res.status(502).json({
+        error: { message, code: 'SPAWN_FAILED' },
+      })
+      return
+    }
+
+    await queries.updateSpawnIntent(intent.id, {
+      status: 'approved',
+      approvedAt: new Date(),
+      errorMessage: null,
+    })
+    logger.info(
+      {
+        intentId: intent.id,
+        hostId: host.hostId,
+        primitive: intent.primitiveName,
+        containerId: primitive.container_id,
+      },
+      'Spawn intent approved'
+    )
+    res.json({ intent: { ...intent, status: 'approved', approvedAt: new Date() }, primitive })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// Cancel a pending intent. No spawner call; just marks the intent cancelled.
+spawnersRouter.post('/:id/spawn-intents/:intentId/cancel', async (req, res, next) => {
+  try {
+    const intent = await queries.getSpawnIntent(req.params.intentId)
+    if (!intent || intent.spawnerHostId !== req.params.id) {
+      throw new AppError(404, 'spawn intent not found', 'SPAWN_INTENT_NOT_FOUND')
+    }
+    if (intent.status !== 'pending') {
+      throw new AppError(
+        409,
+        `intent is ${intent.status}, only pending intents can be cancelled`,
+        'INTENT_NOT_PENDING'
+      )
+    }
+    const updated = await queries.updateSpawnIntent(intent.id, {
+      status: 'cancelled',
+      cancelledAt: new Date(),
+    })
+    logger.info({ intentId: intent.id }, 'Spawn intent cancelled')
+    res.json(updated)
+  } catch (err) {
+    next(err)
+  }
+})
+
+// Read a single intent. Used by the frontend after the badge has been
+// re-rendered from a stored chat (where intent state may have advanced).
+spawnersRouter.get('/:id/spawn-intents/:intentId', async (req, res, next) => {
+  try {
+    const intent = await queries.getSpawnIntent(req.params.intentId)
+    if (!intent || intent.spawnerHostId !== req.params.id) {
+      throw new AppError(404, 'spawn intent not found', 'SPAWN_INTENT_NOT_FOUND')
+    }
+    res.json(intent)
   } catch (err) {
     next(err)
   }
