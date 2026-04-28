@@ -63,6 +63,16 @@ interface Message {
   reads?: ReadInfo[]
   spawns?: SpawnInfo[]
   status?: string
+  // Multi-stage pause: present iff the backend signalled stages_paused on the
+  // last stream attached to this message. Clicking the approve button POSTs
+  // continuationId to /continue and re-attaches a new SSE stream onto the
+  // same message; the field is cleared once another stream attaches.
+  pausedContinuationId?: string
+  pausedHint?: string
+  pausedStagesUsedTotal?: number
+  // Latest stage number observed via stage_start events. Used purely for the
+  // "stage N" indicator next to the spinner during a long multi-stage turn.
+  currentStage?: number
 }
 
 const SAVE_REGEX = /\[save,\s*[^\]]+\]\s*\n[\s\S]*?\n\[end\]/gi
@@ -245,6 +255,165 @@ export default function CoordinatorPage() {
     return ok
   }
 
+  // Consume an SSE response from /message or /continue and update the
+  // assistant message at `assistantIdxRef.current` in place. Accumulator
+  // state is held in refs so a continuation can seed from the prior window.
+  const consumeStream = async (
+    res: Response,
+    assistantIdxRef: { current: number },
+    seed: {
+      accText: string
+      accOracles: OracleResponse[]
+      accDispatches: DispatchInfo[]
+      accReads: ReadInfo[]
+      accSpawns: SpawnInfo[]
+    },
+  ) => {
+    if (!res.body) throw new Error('No response body')
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let accText = seed.accText
+    let accOracles = seed.accOracles
+    let accDispatches = seed.accDispatches
+    let accReads = seed.accReads
+    let accSpawns = seed.accSpawns
+    let currentStatus = ''
+    let currentStage = 0
+    let pausedContinuationId: string | undefined
+    let pausedHint: string | undefined
+    let pausedStagesUsedTotal: number | undefined
+
+    // Coalesce bursts of stream chunks into a single setState per frame.
+    let pendingFrame: number | null = null
+    const flush = () => {
+      pendingFrame = null
+      setMessages(prev => {
+        const updated = prev.slice()
+        const idx = assistantIdxRef.current
+        if (idx >= 0 && idx < updated.length) {
+          updated[idx] = {
+            role: 'assistant',
+            content: accText,
+            oracles: accOracles,
+            dispatches: accDispatches,
+            reads: accReads,
+            spawns: accSpawns,
+            status: currentStatus,
+            currentStage: currentStage || undefined,
+            pausedContinuationId,
+            pausedHint,
+            pausedStagesUsedTotal,
+          }
+        }
+        return updated
+      })
+    }
+    const schedule = () => {
+      if (pendingFrame !== null) return
+      if (typeof requestAnimationFrame === 'function') {
+        pendingFrame = requestAnimationFrame(flush)
+      } else {
+        pendingFrame = window.setTimeout(flush, 16) as unknown as number
+      }
+    }
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const event = JSON.parse(line.slice(6))
+          if (event.type === 'status') {
+            currentStatus = event.message
+            setStatusText(event.message)
+            schedule()
+          } else if (event.type === 'stage_start') {
+            currentStage = event.stage
+            schedule()
+          } else if (event.type === 'oracle') {
+            accOracles = [...accOracles, {
+              domain: event.domain,
+              question: event.question,
+              response: event.response,
+            }]
+            currentStatus = `Got response from ${event.domain}`
+            schedule()
+          } else if (event.type === 'dispatch') {
+            accDispatches = [...accDispatches, {
+              developer: event.developer,
+              developerId: event.developerId,
+              mode: event.mode,
+              runId: event.runId,
+              instructions: event.instructions,
+              queued: !!event.queued,
+              pending: !!event.pending,
+            }]
+            currentStatus = event.pending
+              ? `Awaiting approval: ${event.developer}`
+              : event.queued
+              ? `Queued for ${event.developer}`
+              : `Dispatched to ${event.developer}`
+            schedule()
+          } else if (event.type === 'read') {
+            accReads = [...accReads, {
+              runId: event.runId,
+              found: !!event.found,
+              status: event.status ?? null,
+              developerName: event.developerName ?? null,
+              report: event.report,
+            }]
+            currentStatus = event.found
+              ? `Read run ${String(event.runId).slice(0, 8)} (${event.status})`
+              : `Read run ${String(event.runId).slice(0, 8)} not found`
+            schedule()
+          } else if (event.type === 'spawn') {
+            accSpawns = [...accSpawns, {
+              spawnerHostId: event.spawnerHostId,
+              hostId: event.hostId,
+              primitiveName: event.primitiveName,
+              primitiveKind: event.primitiveKind,
+              image: event.image,
+              spawnIntentId: event.spawnIntentId,
+              pending: !!event.pending,
+              queued: !!event.queued,
+            }]
+            currentStatus = event.pending
+              ? `Awaiting approval: spawn ${event.primitiveName}`
+              : event.queued
+              ? `Queued spawn ${event.primitiveName}`
+              : `Spawning ${event.primitiveName}`
+            schedule()
+          } else if (event.type === 'stages_paused') {
+            pausedContinuationId = event.continuationId
+            pausedHint = event.pendingHint
+            pausedStagesUsedTotal = event.stagesUsedTotal
+            currentStatus = ''
+            schedule()
+          } else if (event.type === 'text') {
+            accText += event.text
+            currentStatus = ''
+            schedule()
+          } else if (event.type === 'done') {
+            currentStatus = ''
+            schedule()
+          }
+        } catch {
+          // skip malformed
+        }
+      }
+    }
+    if (pendingFrame !== null) {
+      if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(pendingFrame)
+      else clearTimeout(pendingFrame)
+    }
+    flush()
+  }
+
   const handleChat = async (text: string): Promise<boolean> => {
     if (!activeChatId) return false
     setMessages(prev => [...prev, { role: 'user', content: text }])
@@ -252,7 +421,6 @@ export default function CoordinatorPage() {
     setStatusText('')
     let messageAccepted = false
 
-    // Add placeholder assistant message
     const assistantIdx = { current: -1 }
     setMessages(prev => {
       assistantIdx.current = prev.length
@@ -267,145 +435,15 @@ export default function CoordinatorPage() {
       })
 
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      if (!res.body) throw new Error('No response body')
-      // Server has accepted the user message at this point — even if the
-      // streamed reply errors mid-flight, the original message is committed.
       messageAccepted = true
 
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      let accText = ''
-      let accOracles: OracleResponse[] = []
-      let accDispatches: DispatchInfo[] = []
-      let accReads: ReadInfo[] = []
-      let accSpawns: SpawnInfo[] = []
-      let currentStatus = ''
-
-      // Coalesce bursts of stream chunks into a single setState per frame.
-      // Without this, each text token triggers a full messages re-render;
-      // react-markdown re-parses the growing body on every chunk which
-      // pegs the main thread during long completions.
-      let pendingFrame: number | null = null
-      const flush = () => {
-        pendingFrame = null
-        setMessages(prev => {
-          const updated = prev.slice()
-          const idx = assistantIdx.current
-          if (idx >= 0 && idx < updated.length) {
-            updated[idx] = {
-              role: 'assistant',
-              content: accText,
-              oracles: accOracles,
-              dispatches: accDispatches,
-              reads: accReads,
-              spawns: accSpawns,
-              status: currentStatus,
-            }
-          }
-          return updated
-        })
-      }
-      const schedule = () => {
-        if (pendingFrame !== null) return
-        if (typeof requestAnimationFrame === 'function') {
-          pendingFrame = requestAnimationFrame(flush)
-        } else {
-          pendingFrame = window.setTimeout(flush, 16) as unknown as number
-        }
-      }
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          try {
-            const event = JSON.parse(line.slice(6))
-            if (event.type === 'status') {
-              currentStatus = event.message
-              setStatusText(event.message)
-              schedule()
-            } else if (event.type === 'oracle') {
-              // New array reference only when an entry is actually added —
-              // lets memoized children skip when unrelated fields update.
-              accOracles = [...accOracles, {
-                domain: event.domain,
-                question: event.question,
-                response: event.response,
-              }]
-              currentStatus = `Got response from ${event.domain}`
-              schedule()
-            } else if (event.type === 'dispatch') {
-              accDispatches = [...accDispatches, {
-                developer: event.developer,
-                developerId: event.developerId,
-                mode: event.mode,
-                runId: event.runId,
-                instructions: event.instructions,
-                queued: !!event.queued,
-                pending: !!event.pending,
-              }]
-              currentStatus = event.pending
-                ? `Awaiting approval: ${event.developer}`
-                : event.queued
-                ? `Queued for ${event.developer}`
-                : `Dispatched to ${event.developer}`
-              schedule()
-            } else if (event.type === 'read') {
-              accReads = [...accReads, {
-                runId: event.runId,
-                found: !!event.found,
-                status: event.status ?? null,
-                developerName: event.developerName ?? null,
-                report: event.report,
-              }]
-              currentStatus = event.found
-                ? `Read run ${String(event.runId).slice(0, 8)} (${event.status})`
-                : `Read run ${String(event.runId).slice(0, 8)} not found`
-              schedule()
-            } else if (event.type === 'spawn') {
-              accSpawns = [...accSpawns, {
-                spawnerHostId: event.spawnerHostId,
-                hostId: event.hostId,
-                primitiveName: event.primitiveName,
-                primitiveKind: event.primitiveKind,
-                image: event.image,
-                spawnIntentId: event.spawnIntentId,
-                pending: !!event.pending,
-                queued: !!event.queued,
-              }]
-              currentStatus = event.pending
-                ? `Awaiting approval: spawn ${event.primitiveName}`
-                : event.queued
-                ? `Queued spawn ${event.primitiveName}`
-                : `Spawning ${event.primitiveName}`
-              schedule()
-            } else if (event.type === 'text') {
-              accText += event.text
-              currentStatus = ''
-              schedule()
-            } else if (event.type === 'done') {
-              currentStatus = ''
-              schedule()
-            }
-          } catch {
-            // skip malformed
-          }
-        }
-      }
-      // Ensure the terminal state actually lands even if no events arrived
-      // after the last scheduled frame.
-      if (pendingFrame !== null) {
-        if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(pendingFrame)
-        else clearTimeout(pendingFrame)
-      }
-      flush()
+      await consumeStream(res, assistantIdx, {
+        accText: '',
+        accOracles: [],
+        accDispatches: [],
+        accReads: [],
+        accSpawns: [],
+      })
     } catch (err) {
       setMessages(prev => {
         const updated = prev.slice()
@@ -424,6 +462,68 @@ export default function CoordinatorPage() {
       loadChats()
     }
     return messageAccepted
+  }
+
+  // Resume a paused multi-stage turn. Reads the existing accumulators off the
+  // assistant message (so the next window's events append cleanly onto window
+  // 1's badges) and POSTs the continuationId to /continue.
+  const handleContinue = async (messageIdx: number) => {
+    if (!activeChatId) return
+    let continuationId: string | undefined
+    let seed: {
+      accText: string
+      accOracles: OracleResponse[]
+      accDispatches: DispatchInfo[]
+      accReads: ReadInfo[]
+      accSpawns: SpawnInfo[]
+    } | null = null
+    setMessages(prev => {
+      const m = prev[messageIdx]
+      if (!m || m.role !== 'assistant' || !m.pausedContinuationId) return prev
+      continuationId = m.pausedContinuationId
+      seed = {
+        accText: m.content,
+        accOracles: m.oracles ?? [],
+        accDispatches: m.dispatches ?? [],
+        accReads: m.reads ?? [],
+        accSpawns: m.spawns ?? [],
+      }
+      // Clear pause state immediately so the user can't double-click.
+      const updated = prev.slice()
+      updated[messageIdx] = { ...m, pausedContinuationId: undefined, pausedHint: undefined, status: 'Resuming…' }
+      return updated
+    })
+    if (!continuationId || !seed) return
+
+    setLoading(true)
+    setStatusText('Resuming…')
+    const idxRef = { current: messageIdx }
+    try {
+      const res = await fetch(`/api/coordinator/chats/${activeChatId}/continue`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ continuationId }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      await consumeStream(res, idxRef, seed)
+    } catch (err) {
+      setMessages(prev => {
+        const updated = prev.slice()
+        const m = updated[messageIdx]
+        if (m && m.role === 'assistant') {
+          updated[messageIdx] = {
+            ...m,
+            content: (m.content ? m.content + '\n\n' : '') + `(Resume failed: ${err instanceof Error ? err.message : 'Unknown'} — start a new turn.)`,
+            status: '',
+          }
+        }
+        return updated
+      })
+    } finally {
+      setLoading(false)
+      setStatusText('')
+      loadChats()
+    }
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -509,6 +609,7 @@ Bonfire architecture now uses 4 stages
                   isLast={i === messages.length - 1}
                   loading={loading}
                   onRewind={rewindFromMessage}
+                  onContinue={() => handleContinue(i)}
                 />
               ))}
             </div>
@@ -548,9 +649,10 @@ interface MessageRowProps {
   isLast: boolean
   loading: boolean
   onRewind: (id: string) => void
+  onContinue: () => void
 }
 
-const MessageRow = memo(function MessageRow({ message: msg, isLast, loading, onRewind }: MessageRowProps) {
+const MessageRow = memo(function MessageRow({ message: msg, isLast, loading, onRewind, onContinue }: MessageRowProps) {
   return (
     <div className={`group relative max-w-2xl ${msg.role === 'user' ? 'ml-auto' : 'mr-auto'}`}>
       <div className="flex items-center gap-2 mb-1">
@@ -577,6 +679,7 @@ const MessageRow = memo(function MessageRow({ message: msg, isLast, loading, onR
         <div className="flex items-center gap-2 text-xs text-zinc-500 mb-2 px-4 py-2 bg-zinc-900/50 rounded border border-zinc-800">
           <span className="animate-spin inline-block w-3 h-3 border border-zinc-500 border-t-transparent rounded-full" />
           {msg.status}
+          {msg.currentStage ? <span className="text-zinc-600">· stage {msg.currentStage}</span> : null}
         </div>
       )}
 
@@ -636,6 +739,27 @@ const MessageRow = memo(function MessageRow({ message: msg, isLast, loading, onR
           msg.content || null
         )}
       </div>
+
+      {/* Multi-stage pause: coordinator hit the per-window stage budget and
+          wants approval before continuing. Clicking POSTs to /continue,
+          which re-attaches a new SSE stream and appends its events to this
+          same message. */}
+      {msg.role === 'assistant' && msg.pausedContinuationId && (
+        <div className="mt-2 px-3 py-2 bg-amber-950/40 border border-amber-900 rounded text-xs">
+          <div className="text-amber-300 mb-2">
+            Paused after {msg.pausedStagesUsedTotal ?? '?'} stage(s).{' '}
+            {msg.pausedHint ?? 'Coordinator may want more — approve to continue.'}
+          </div>
+          <Button
+            size="sm"
+            onClick={onContinue}
+            disabled={loading}
+            className="bg-amber-700 hover:bg-amber-600 text-amber-50"
+          >
+            {loading ? 'Working…' : 'Approve next stages'}
+          </Button>
+        </div>
+      )}
     </div>
   )
 })

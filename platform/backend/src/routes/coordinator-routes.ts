@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { run, type CoordinatorEvent } from '../services/coordinator.js'
+import { run, resumeRun, type CoordinatorEvent } from '../services/coordinator.js'
 import { mergeIntoState } from '../services/oracle-engine.js'
 import * as oracleQueries from '../db/queries/oracles.js'
 import * as chatDb from '../db/queries/coordinator-chats.js'
@@ -162,6 +162,77 @@ coordinatorRouter.post('/chats/:id/save', async (req, res, next) => {
   } catch (error) { next(error) }
 })
 
+// Chat ID + outcome of the multi-stage run, used by both POST /message
+// (fresh turn) and POST /continue (resume after approval window). Persistence
+// of the assistant message ONLY happens on completion; pauses leave nothing
+// on disk because the in-memory continuation carries forward state.
+const persistAssistantMessage = async (
+  chatId: string,
+  fullText: string,
+  accumulator: import('../services/coordinator.js').StageAccumulator,
+  trailer: import('../services/coordinator.js').TurnTrailer,
+) => {
+  if (!fullText) return
+  // Map accumulator → existing badge shapes the FE renders. Dispatch results
+  // include a developerId in the SSE event but accumulator only stores the
+  // backend-shaped DispatchResult — we drop developerId from sentinel here
+  // because the FE polls runs by developerId/runId and gets that from the
+  // SSE-attached badge state, NOT from the persisted sentinel. After reload
+  // the FE reconstructs the badge by looking up the run's developer from the
+  // run record itself. (developerId is preserved in the live SSE event so
+  // active sessions still get instant badge polling.)
+  const dispatches = accumulator.dispatchResults
+    .filter((d) => !d.error && d.runId && d.developerId)
+    .map((d) => ({
+      developer: d.developer,
+      developerId: d.developerId!,
+      mode: d.mode,
+      runId: d.runId!,
+      instructions: d.instructions,
+      queued: false,
+      pending: true,
+    }))
+  const oracles = accumulator.oracleResponses
+  const reads = accumulator.readResults.map((r) => ({
+    runId: r.runId,
+    found: r.found,
+    status: r.status,
+    developerName: r.developerName,
+    report: r.report,
+  }))
+  const spawns = accumulator.spawnResults
+    .filter((s) => !s.error && s.intentId && s.primitiveKind)
+    .map((s) => ({
+      spawnerHostId: s.hostId,
+      hostId: s.hostId,
+      primitiveName: s.primitiveName,
+      primitiveKind: s.primitiveKind!,
+      image: s.image ?? '',
+      spawnIntentId: s.intentId!,
+      pending: true,
+      queued: false,
+    }))
+
+  let stored = fullText
+  if (oracles.length > 0) stored += `\n\n<!--ORACLES:${JSON.stringify(oracles)}:ORACLES-->`
+  if (dispatches.length > 0) stored += `\n\n<!--DISPATCHES:${JSON.stringify(dispatches)}:DISPATCHES-->`
+  if (reads.length > 0) stored += `\n\n<!--READS:${JSON.stringify(reads)}:READS-->`
+  if (spawns.length > 0) stored += `\n\n<!--SPAWNS:${JSON.stringify(spawns)}:SPAWNS-->`
+
+  const primary = trailer.second_pass ?? trailer.first_pass
+  const totalCostUsd = trailer.first_pass.cost_usd + (trailer.second_pass?.cost_usd ?? 0)
+  const totalDurationMs = trailer.first_pass.duration_ms + (trailer.second_pass?.duration_ms ?? 0)
+  await chatDb.addMessage(chatId, 'assistant', stored, {
+    provider: 'anthropic-oauth',
+    model: primary.model,
+    totalCostUsd,
+    durationMs: totalDurationMs,
+    stopReason: primary.stop_reason,
+    trailer: trailer as unknown as Record<string, unknown>,
+  })
+  await chatDb.touchChat(chatId, { addCostUsd: totalCostUsd, addDurationMs: totalDurationMs })
+}
+
 // --- Chat message (SSE stream) ---
 
 coordinatorRouter.post('/chats/:id/message', async (req, res, next) => {
@@ -184,108 +255,79 @@ coordinatorRouter.post('/chats/:id/message', async (req, res, next) => {
 
     logger.info({ chatId: chat.id, historyLength: history.length }, 'Coordinator message')
 
-    // SSE headers
     res.setHeader('Content-Type', 'text/event-stream')
     res.setHeader('Cache-Control', 'no-cache')
     res.setHeader('Connection', 'keep-alive')
 
-    const collectedOracles: { domain: string; question: string; response: string }[] = []
-    const collectedDispatches: {
-      developer: string
-      developerId: string
-      mode: string
-      runId: string
-      instructions: string
-      queued: boolean
-      pending: boolean
-    }[] = []
-    const collectedReads: {
-      runId: string
-      found: boolean
-      status: string | null
-      developerName: string | null
-      report: string
-    }[] = []
-    const collectedSpawns: {
-      spawnerHostId: string
-      hostId: string
-      primitiveName: string
-      primitiveKind: string
-      image: string
-      spawnIntentId: string
-      pending: boolean
-      queued: boolean
-    }[] = []
-
-    const { text: fullText, trailer } = await run(message, history, (event) => {
-      if (event.type === 'oracle') {
-        collectedOracles.push({ domain: event.domain, question: event.question, response: event.response })
-      } else if (event.type === 'dispatch') {
-        collectedDispatches.push({
-          developer: event.developer,
-          developerId: event.developerId,
-          mode: event.mode,
-          runId: event.runId,
-          instructions: event.instructions,
-          queued: event.queued,
-          pending: event.pending,
-        })
-      } else if (event.type === 'read') {
-        collectedReads.push({
-          runId: event.runId,
-          found: event.found,
-          status: event.status,
-          developerName: event.developerName,
-          report: event.report,
-        })
-      } else if (event.type === 'spawn') {
-        collectedSpawns.push({
-          spawnerHostId: event.spawnerHostId,
-          hostId: event.hostId,
-          primitiveName: event.primitiveName,
-          primitiveKind: event.primitiveKind,
-          image: event.image,
-          spawnIntentId: event.spawnIntentId,
-          pending: event.pending,
-          queued: event.queued,
-        })
-      }
+    const result = await run(message, history, (event) => {
       sendSSE(res, event)
     })
 
-    // Persist — append oracle/dispatch/read data as JSON sentinels so badges expand on reload
-    if (fullText) {
-      let stored = fullText
-      if (collectedOracles.length > 0) {
-        stored += `\n\n<!--ORACLES:${JSON.stringify(collectedOracles)}:ORACLES-->`
-      }
-      if (collectedDispatches.length > 0) {
-        stored += `\n\n<!--DISPATCHES:${JSON.stringify(collectedDispatches)}:DISPATCHES-->`
-      }
-      if (collectedReads.length > 0) {
-        stored += `\n\n<!--READS:${JSON.stringify(collectedReads)}:READS-->`
-      }
-      if (collectedSpawns.length > 0) {
-        stored += `\n\n<!--SPAWNS:${JSON.stringify(collectedSpawns)}:SPAWNS-->`
-      }
-      // Roll up both passes into the message-level summary; second pass is the
-      // user-facing one when present, else we attribute everything to the first.
-      const primary = trailer.second_pass ?? trailer.first_pass
-      const totalCostUsd = trailer.first_pass.cost_usd + (trailer.second_pass?.cost_usd ?? 0)
-      const totalDurationMs = trailer.first_pass.duration_ms + (trailer.second_pass?.duration_ms ?? 0)
-      await chatDb.addMessage(chat.id, 'assistant', stored, {
-        provider: 'anthropic-oauth',
-        model: primary.model,
-        totalCostUsd,
-        durationMs: totalDurationMs,
-        stopReason: primary.stop_reason,
-        trailer: trailer as unknown as Record<string, unknown>,
-      })
-      await chatDb.touchChat(chat.id, { addCostUsd: totalCostUsd, addDurationMs: totalDurationMs })
+    if (!result.paused) {
+      await persistAssistantMessage(chat.id, result.text, result.accumulator, result.trailer)
     }
 
     res.end()
-    logger.info({ chatId: chat.id, totalCostUsd: trailer.first_pass.cost_usd + (trailer.second_pass?.cost_usd ?? 0) }, 'Coordinator completed')
+    logger.info({
+      chatId: chat.id,
+      paused: result.paused,
+      totalCostUsd: result.trailer.first_pass.cost_usd + (result.trailer.second_pass?.cost_usd ?? 0),
+    }, result.paused ? 'Coordinator paused for approval' : 'Coordinator completed')
+  } catch (error) {
+    if (res.headersSent) {
+      sendSSE(res, { type: 'status', message: `Error: ${error instanceof Error ? error.message : 'Unknown'}` })
+      res.end()
+    } else {
+      next(error)
+    }
+  }
+})
+
+// --- Continue paused multi-stage run (SSE stream) ---
+//
+// Called when the user clicks "Approve next stages" on a paused turn. The
+// continuationId references in-memory state held in the coordinator service
+// (consumed one-shot — re-clicking is a no-op 410). The same SSE stream
+// shape as /message is used; persistence here covers events from ALL
+// windows because the accumulator is carried forward in the continuation.
+coordinatorRouter.post('/chats/:id/continue', async (req, res, next) => {
+  try {
+    const { continuationId } = req.body
+    if (!continuationId || typeof continuationId !== 'string') {
+      throw new AppError(400, 'continuationId is required', 'INVALID_INPUT')
+    }
+
+    const chat = await chatDb.getChat(req.params.id)
+    if (!chat) throw new AppError(404, 'Chat not found', 'NOT_FOUND')
+
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+
+    let result
+    try {
+      result = await resumeRun(continuationId, (event) => {
+        sendSSE(res, event)
+      })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown'
+      sendSSE(res, { type: 'status', message: `Error: ${msg}` })
+      sendSSE(res, { type: 'done' })
+      res.end()
+      logger.warn({ chatId: chat.id, error: msg }, 'Coordinator resume failed')
+      return
+    }
+
+    if (!result.paused) {
+      await persistAssistantMessage(chat.id, result.text, result.accumulator, result.trailer)
+    }
+
+    res.end()
+    logger.info({
+      chatId: chat.id,
+      paused: result.paused,
+      totalCostUsd: result.trailer.first_pass.cost_usd + (result.trailer.second_pass?.cost_usd ?? 0),
+    }, result.paused ? 'Coordinator paused again' : 'Coordinator completed after resume')
   } catch (error) {
     if (res.headersSent) {
       sendSSE(res, { type: 'status', message: `Error: ${error instanceof Error ? error.message : 'Unknown'}` })

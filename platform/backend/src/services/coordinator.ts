@@ -1,5 +1,6 @@
 import { readFile } from 'fs/promises'
 import { join } from 'path'
+import { randomUUID } from 'crypto'
 import { parse as parseYaml } from 'yaml'
 import { config } from '../config.js'
 import { logger } from '../utils/logger.js'
@@ -26,6 +27,19 @@ const SECOND_PASS_SYSTEM_PROMPT =
 // (`claude --print --tools ''`) didn't pass --max-tokens, so it used this same
 // internal default. Preserving it keeps response budgets identical post-swap.
 const COORDINATOR_MAX_TOKENS = 64_000
+
+// Multi-stage first pass: how many command iterations the model gets before we
+// pause for explicit user approval. Each stage = one runFirstPassDirect call
+// followed by parallel execution of any commands it emitted. Resumption gets
+// another full window. No hard cap — the user can approve as many windows as
+// they want.
+const STAGE_BUDGET = 4
+
+// In-memory store of paused multi-stage turns keyed by continuation id. Held
+// for CONTINUATION_TTL_MS so an unattended approval window doesn't leak
+// indefinitely. Lost on process restart — frontend handles 404 by surfacing
+// the error so the user can retry from scratch.
+const CONTINUATION_TTL_MS = 30 * 60 * 1000
 
 export interface TurnTrailer {
   first_pass: MessageTrailer
@@ -73,6 +87,14 @@ export type CoordinatorEvent =
       queued: boolean
     }
   | { type: 'text'; text: string }
+  | { type: 'stage_start'; stage: number; window: number }
+  | {
+      type: 'stages_paused'
+      continuationId: string
+      stagesUsedThisWindow: number
+      stagesUsedTotal: number
+      pendingHint: string
+    }
   | { type: 'done' }
 
 interface OracleSummary {
@@ -134,7 +156,9 @@ const buildFirstPassPrompt = (
   developerList: DeveloperSummary[],
   spawnerHostList: SpawnerHostSummary[],
   history: ChatMessage[],
-  message: string
+  message: string,
+  priorStages: StageAccumulator | null = null,
+  currentStage = 1,
 ): string => {
   const oracleListStr = oracleList
     .map((o) => `- ${o.domain}${o.description ? ': ' + o.description : ''}`)
@@ -241,13 +265,28 @@ Developers process dispatches FIFO per developer — the order you emit the [dis
 
 Do NOT retroactively split dispatches that are already queued — this rule is forward-looking.
 
+## Multi-stage shape (IMPORTANT)
+
+A single user turn runs in iterative stages. Each stage you may emit any combination of [query], [read], [dispatch], [spawn] commands. After each stage executes, the results are appended to your context AND YOU ARE INVOKED AGAIN as another first-pass — same prompt, same affordances. You keep going until you emit no commands; then a synthesis pass writes the user-facing reply.
+
+**This means:** when you need oracle/read results to decide what to dispatch, you do NOT have to commit to the dispatch upfront. The right pattern:
+- Stage 1 — emit only the [query, ...] / [read, ...] commands you need data from.
+- Stage 2 — see the results, then emit the [dispatch, ...] using them.
+- Stage 3+ — keep going if needed (more queries based on prior responses, dependent dispatches, etc.).
+- Final stage — emit no commands. Synthesis runs and writes the user-facing reply.
+
+You get ${STAGE_BUDGET} stages before the user is asked to approve continuing. They can approve as many windows as they want, so don't artificially compress — split work across stages whenever splitting makes the dispatch instructions sharper. But also don't pad: emit no commands the moment you have what you need.
+
+Synthesis is text-only — it is NEVER scanned for commands. Anything that needs to "do" something MUST be a command, in some stage, before synthesis runs. Describing a dispatch in synthesis prose ("I will dispatch X" / "Dispatched X — pending approval") does not dispatch anything; it produces a fake-looking message with no badge.
+
 ## Rules
-- You can query multiple oracles and dispatch to developers in the same turn. Output ALL commands you need, then stop. Do NOT write any prose before or after the commands — let the synthesis pass produce the user-facing response.
-- CRITICAL: If you intend to dispatch, you MUST use the [dispatch, ...][end] syntax. Describing a dispatch in prose ("I will dispatch X to do Y") does NOT actually dispatch anything. The command syntax is the only way to trigger real work.
+- You can mix [query] / [read] / [dispatch] / [spawn] in any single stage. Output ALL commands for the current stage, then stop. Do NOT write any prose before or after the commands.
+- CRITICAL: If you intend to dispatch, you MUST use the [dispatch, ...][end] syntax in some stage. Describing a dispatch in prose does NOT actually dispatch anything.
 - Dispatches are PROVISIONAL. They land in a 'pending' state and wait for the user to approve, cancel, or edit them via the chat badge. Do NOT ask the user "do you approve?" in prose — the badge buttons are the approval surface. Write instructions confidently as if they will run.
 - Dispatches are fire-and-report — they return a runId the user can track. Don't wait for completion in your response.
+- Do NOT re-emit a command across stages. Each prior stage's results are visible in your context — treat them as already executed.
 - Prefer 'clarify' mode when the request is high-level or ambiguous. Prefer 'implement' when the user has been specific or confirmed the approach.
-- If the question is purely conversational AND needs no oracle data or dispatch, respond directly in plain prose (no fake command formatting).
+- If the question is purely conversational AND needs no oracle data or dispatch, respond directly in plain prose (no fake command formatting). This counts as "no commands" and skips synthesis — the prose IS the reply.
 - Never assume. If the request is ambiguous, ask the user a clarifying question directly — do not dispatch blindly.
 - NEVER tell the user you can't access oracles/developers — you can, every turn.
 - Only dispatch to online developers.`
@@ -258,11 +297,21 @@ Do NOT retroactively split dispatches that are already queued — this rule is f
 
   prompt += formatHistory(history)
   prompt += `\n\nUser: ${message}`
+
+  // Inject prior-stage results so the model can decide what (if anything) to
+  // emit next based on what it already pulled. Format matches synthesis-pass
+  // result blocks so the shape stays consistent across passes.
+  if (priorStages && !accumulatorEmpty(priorStages)) {
+    prompt += `\n\n--- RESULTS FROM PRIOR STAGES IN THIS TURN ---${formatStageResults(priorStages)}\n--- END PRIOR STAGES ---`
+    prompt += `\n\nThis is stage ${currentStage}. Emit any further commands you need (treating the above as already executed — do NOT re-emit), or emit no commands to proceed to the synthesis pass.`
+  }
+
   return prompt
 }
 
 interface DispatchResult {
   developer: string
+  developerId: string | null
   mode: RunMode
   runId: string | null
   instructions: string
@@ -278,14 +327,44 @@ const buildSecondPassPrompt = (
   history: ChatMessage[],
   message: string
 ): string => {
-  let prompt = `You are a coordinator. You just queried oracles, dispatched developers, spawned primitives, and/or pulled run reports — results are below. Synthesize a response for the user.
+  const dispatched = dispatchResults.filter((d) => !d.error)
+  const dispatchFailed = dispatchResults.filter((d) => d.error)
+  const spawned = spawnResults.filter((s) => !s.error)
+  const reads = readResults
+  const oraclesUsed = oracleResponses
 
+  // CRITICAL framing: enumerate what ACTUALLY happened so the model can't
+  // narrate something different. The previous prompt opened with "you just
+  // dispatched developers" unconditionally — that primed past-tense
+  // narration even when no dispatch was emitted. The model would then write
+  // "Dispatched X — pending approval" with no command behind it. The lists
+  // below are the ground truth.
+  const truthLines: string[] = []
+  truthLines.push(`Oracles consulted: ${oraclesUsed.length}`)
+  truthLines.push(`Dispatches emitted: ${dispatched.length}${dispatchFailed.length > 0 ? ` (plus ${dispatchFailed.length} failed)` : ''}`)
+  truthLines.push(`Reads pulled: ${reads.length}`)
+  truthLines.push(`Spawns proposed: ${spawned.length}`)
+  const truth = truthLines.join('\n')
+
+  let prompt = `You are a coordinator. The user's turn ran across one or more stages of [query]/[read]/[dispatch]/[spawn] commands. The actual results from those stages are below. Synthesize the user-facing reply.
+
+GROUND TRUTH FOR THIS TURN — narrate ONLY this:
+${truth}
+
+CRITICAL — do not narrate actions that did not happen:
+- If "Dispatches emitted" is 0, you MUST NOT write "Dispatched X" / "I dispatched X" / "X is pending approval in a badge" anywhere. There is no badge. Saying so produces a fake message and the user loses trust.
+- If "Spawns proposed" is 0, you MUST NOT claim a spawn happened.
+- If "Reads pulled" is 0, do not claim you read a run report.
+- If you wanted to dispatch but didn't, just say so plainly: "I have the data; want me to dispatch X to do Y?" — let the user trigger the next turn.
+- The result blocks below are exhaustive. Anything not listed there did not happen this turn.
+
+Style:
 - Answer the user's question directly, using oracle data and run reports as source of truth.
-- If you dispatched, tell the user briefly: which developer, mode, and that the dispatch is awaiting their approval in the chat badge. Dispatches do NOT execute until the user approves — treat them as provisional.
+- For each real dispatch (one that appears in a DISPATCHED block below), tell the user briefly: which developer, mode, and that it's awaiting approval in the chat badge.
 - Do NOT repeat the full dispatch instructions in your user message. The user can expand the dispatch badge to see them (and can edit them before approving).
-- When you dispatched, ALWAYS include a "## Decisions I Made" section in your user-facing message. List the assumptions you made and ambiguities you resolved on the user's behalf (e.g. "picked implement over clarify because X", "scoped to module Y, skipped Z", "chose name/path W because V"). This is the user's chance to catch you before they approve the dispatch.
-- If you spawned, the same "Decisions I Made" rule applies: list assumed image tags, env vars, mount paths. Spawn intents are also pending approval — the user clicks Approve in the spawn badge to actually create the container on the spawner host.
-- If you pulled a run report, summarize what the run accomplished (or failed at) — the user wants the takeaway, not a dump of the full report. They can expand the read badge to see the raw text.
+- When you dispatched, ALWAYS include a "## Decisions I Made" section listing assumptions/ambiguities you resolved (e.g. "picked implement over clarify because X", "scoped to module Y, skipped Z"). This is the user's chance to catch you before they approve.
+- If you spawned, same "Decisions I Made" rule applies for image tags, env vars, mount paths.
+- If you pulled a run report, summarize the takeaway — the user can expand the read badge for raw text.
 - Be dense. No filler, no meta-commentary about oracles or your process.
 - You have live oracle/developer/spawner access every turn — never say otherwise.`
 
@@ -538,61 +617,124 @@ const runSecondPassDirect = async (
   return { text: result.content.trim(), trailer: result.trailer }
 }
 
-export const run = async (
-  message: string,
-  history: ChatMessage[],
-  emit: (event: CoordinatorEvent) => void
-): Promise<{ text: string; trailer: TurnTrailer }> => {
-  const [profile, oracleList, developerList, spawnerHostList] = await Promise.all([
-    loadUserProfile(),
-    loadOracleList(),
-    loadDeveloperList(),
-    loadSpawnerHostList(),
-  ])
+// --- Multi-stage state -------------------------------------------------------
 
-  emit({ type: 'status', message: `Deciding (${oracleList.length} oracles, ${developerList.length} devs, ${spawnerHostList.length} hosts available)...` })
+export interface StageAccumulator {
+  oracleResponses: { domain: string; question: string; response: string }[]
+  dispatchResults: DispatchResult[]
+  readResults: ReadResult[]
+  spawnResults: SpawnResult[]
+}
 
-  const firstPassPrompt = buildFirstPassPrompt(profile, oracleList, developerList, spawnerHostList, history, message)
-  const { text: firstPassOutput, trailer: firstPassTrailer } = await runFirstPassDirect(firstPassPrompt)
-  const queries = parseQueryCommands(firstPassOutput)
-  const dispatches = parseDispatchCommands(firstPassOutput)
-  const reads = parseReadCommands(firstPassOutput)
-  const spawns = parseSpawnCommands(firstPassOutput)
+const newAccumulator = (): StageAccumulator => ({
+  oracleResponses: [],
+  dispatchResults: [],
+  readResults: [],
+  spawnResults: [],
+})
 
-  // Log every first-pass for debugging command parsing
-  logger.info({
-    queriesFound: queries.length,
-    dispatchesFound: dispatches.length,
-    readsFound: reads.length,
-    spawnsFound: spawns.length,
-    outputPreview: firstPassOutput.slice(0, 800),
-    firstPassCostUsd: firstPassTrailer.cost_usd,
-    firstPassTokens: { input: firstPassTrailer.input_tokens, output: firstPassTrailer.output_tokens },
-  }, 'Coordinator first pass decision')
+const accumulatorEmpty = (a: StageAccumulator): boolean =>
+  a.oracleResponses.length === 0 &&
+  a.dispatchResults.length === 0 &&
+  a.readResults.length === 0 &&
+  a.spawnResults.length === 0
 
-  // No commands — direct answer
-  if (
-    queries.length === 0 &&
-    dispatches.length === 0 &&
-    reads.length === 0 &&
-    spawns.length === 0
-  ) {
-    logger.info('Coordinator answered directly')
-    emit({ type: 'text', text: firstPassOutput })
-    emit({ type: 'done' })
-    return { text: firstPassOutput, trailer: { first_pass: firstPassTrailer, second_pass: null } }
+// Same block format used by both pass-1 (priors) and pass-2 (synthesis input)
+// so the model sees a consistent shape across stages.
+const formatStageResults = (a: StageAccumulator): string => {
+  const out: string[] = []
+  for (const r of a.oracleResponses) {
+    out.push(`\n\n--- ORACLE: ${r.domain} (Q: ${r.question}) ---\n${r.response}\n--- END ORACLE ---`)
   }
+  for (const d of a.dispatchResults) {
+    if (d.error) {
+      out.push(`\n\n--- DISPATCH FAILED: ${d.developer} ---\nError: ${d.error}\nInstructions attempted: ${d.instructions}\n--- END DISPATCH ---`)
+    } else {
+      out.push(`\n\n--- DISPATCHED (pending approval): ${d.developer} (mode: ${d.mode}, runId: ${d.runId}) ---\nInstructions: ${d.instructions}\n--- END DISPATCH ---`)
+    }
+  }
+  for (const r of a.readResults) {
+    out.push(`\n\n--- READ RUN: ${r.runId} ---\n${r.report}\n--- END READ ---`)
+  }
+  for (const s of a.spawnResults) {
+    if (s.error) {
+      out.push(`\n\n--- SPAWN FAILED: ${s.primitiveName} on ${s.hostId} ---\nError: ${s.error}\n--- END SPAWN ---`)
+    } else {
+      out.push(`\n\n--- SPAWN PROPOSED (pending approval): ${s.primitiveName} (${s.primitiveKind}) on ${s.hostId} ---\nImage: ${s.image}\nIntent: ${s.intentId}\n--- END SPAWN ---`)
+    }
+  }
+  return out.join('')
+}
 
-  if (queries.length > 0) {
-    emit({ type: 'status', message: `Querying ${queries.length} oracle(s): ${queries.map((q) => q.domain).join(', ')}` })
-  }
-  if (reads.length > 0) {
-    emit({ type: 'status', message: `Reading ${reads.length} run report(s)` })
-  }
-  if (spawns.length > 0) {
-    emit({ type: 'status', message: `Proposing ${spawns.length} spawn(s)` })
-  }
+// Snapshot of everything `run()` needs to keep going across a pause/resume.
+// We snapshot once at the start of a new turn (oracleList, developerList,
+// hosts, profile) so registry updates mid-window don't change the shape the
+// model has been reasoning against.
+interface RuntimeState {
+  message: string
+  history: ChatMessage[]
+  profile: string
+  oracleList: OracleSummary[]
+  developerList: DeveloperSummary[]
+  spawnerHostList: SpawnerHostSummary[]
+}
 
+interface ContinuationState {
+  runtime: RuntimeState
+  accumulator: StageAccumulator
+  // Sum-trailer for all first-pass calls executed so far across windows.
+  firstPassTrailer: MessageTrailer
+  stagesUsedTotal: number
+  createdAt: number
+}
+
+const pendingContinuations = new Map<string, ContinuationState>()
+
+// Sum two trailers field-wise so the chat-message-level rollup reflects the
+// real cost across an arbitrary number of stages.
+const zeroTrailer = (): MessageTrailer => ({
+  model: null,
+  message_id: null,
+  stop_reason: null,
+  stop_sequence: null,
+  duration_ms: 0,
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_creation_input_tokens: 0,
+  cache_read_input_tokens: 0,
+  cost_usd: 0,
+})
+
+const addTrailer = (a: MessageTrailer, b: MessageTrailer): MessageTrailer => ({
+  model: b.model ?? a.model,
+  message_id: b.message_id ?? a.message_id,
+  stop_reason: b.stop_reason ?? a.stop_reason,
+  stop_sequence: b.stop_sequence ?? a.stop_sequence,
+  duration_ms: a.duration_ms + b.duration_ms,
+  input_tokens: a.input_tokens + b.input_tokens,
+  output_tokens: a.output_tokens + b.output_tokens,
+  cache_creation_input_tokens: a.cache_creation_input_tokens + b.cache_creation_input_tokens,
+  cache_read_input_tokens: a.cache_read_input_tokens + b.cache_read_input_tokens,
+  cost_usd: a.cost_usd + b.cost_usd,
+})
+
+// Run all of one stage's commands in parallel and emit per-result SSE events.
+// Pure data in / events out — no state mutation. The caller appends results
+// onto the long-lived accumulator.
+const executeStage = async (
+  cmds: {
+    queries: { domain: string; question: string }[]
+    dispatches: { developer: string; mode: RunMode; instructions: string }[]
+    reads: { runId: string }[]
+    spawns: ParsedSpawnCommand[]
+  },
+  emit: (event: CoordinatorEvent) => void,
+): Promise<{
+  oracleResponses: { domain: string; question: string; response: string }[]
+  dispatchResults: DispatchResult[]
+  readResults: ReadResult[]
+  spawnResults: SpawnResult[]
+}> => {
   const [allOracles, allDevelopers, allHosts] = await Promise.all([
     oracleQueries.listOracles(),
     developerQueries.listDevelopers(),
@@ -603,10 +745,9 @@ export const run = async (
   const developersById = new Map(allDevelopers.map((d) => [d.id, d]))
   const hostsByHostId = new Map(allHosts.map((h) => [h.hostId, h]))
 
-  // Oracle queries + dispatches + reads + spawns in parallel
   const [oracleResponses, dispatchResults, readResults, spawnResults] = await Promise.all([
     Promise.all(
-      queries.map(async (q) => {
+      cmds.queries.map(async (q) => {
         const oracle = oraclesByDomain.get(q.domain)
         if (!oracle) {
           const r = { domain: q.domain, question: q.question, response: `[Oracle "${q.domain}" not found]` }
@@ -627,15 +768,24 @@ export const run = async (
       })
     ),
     Promise.all(
-      dispatches.map(async (d): Promise<DispatchResult> => {
+      cmds.dispatches.map(async (d): Promise<DispatchResult> => {
         const dev = developersByName.get(d.developer)
         if (!dev) {
-          return { developer: d.developer, mode: d.mode, runId: null, instructions: d.instructions, error: `Developer "${d.developer}" not found` }
+          // Surface lookup failures to the user via SSE — silent failure
+          // here was the prior bug class (badge never appeared, model later
+          // claimed dispatch happened in synthesis prose).
+          const result: DispatchResult = {
+            developer: d.developer,
+            developerId: null,
+            mode: d.mode,
+            runId: null,
+            instructions: d.instructions,
+            error: `Developer "${d.developer}" not found`,
+          }
+          logger.warn({ developer: d.developer }, 'Dispatch failed: developer not found')
+          return result
         }
         try {
-          // Coordinator-initiated dispatches land in 'pending' and wait for
-          // the user to approve or cancel them from the chat badge. We do
-          // NOT call developerRegistry.dispatch here — approval drives that.
           const run = await developerQueries.createRun(dev.id, d.instructions, d.mode, 'pending')
           logger.info({ runId: run.id, developer: d.developer }, 'Dispatch pending approval')
           emit({
@@ -648,17 +798,16 @@ export const run = async (
             queued: false,
             pending: true,
           })
-          return { developer: d.developer, mode: d.mode, runId: run.id, instructions: d.instructions, error: null }
+          return { developer: d.developer, developerId: dev.id, mode: d.mode, runId: run.id, instructions: d.instructions, error: null }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
-          return { developer: d.developer, mode: d.mode, runId: null, instructions: d.instructions, error: msg }
+          logger.error({ developer: d.developer, error: msg }, 'Dispatch failed: createRun threw')
+          return { developer: d.developer, developerId: dev.id, mode: d.mode, runId: null, instructions: d.instructions, error: msg }
         }
       })
     ),
     Promise.all(
-      reads.map(async (r): Promise<ReadResult> => {
-        // UUID format check up front — anything else is almost certainly a
-        // typo, and getRun would round-trip to the DB just to return null.
+      cmds.reads.map(async (r): Promise<ReadResult> => {
         const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(r.runId)
         if (!isUuid) {
           const result: ReadResult = {
@@ -710,10 +859,7 @@ export const run = async (
       })
     ),
     Promise.all(
-      spawns.map(async (s): Promise<SpawnResult> => {
-        // Surface parser errors as failed spawn results without aborting the
-        // turn — same shape as a Dispatch error so the second pass can mention
-        // them in the synthesized response.
+      cmds.spawns.map(async (s): Promise<SpawnResult> => {
         if (s.parseError || !s.spec) {
           return {
             hostId: s.hostId,
@@ -725,9 +871,6 @@ export const run = async (
           }
         }
         const host = hostsByHostId.get(s.hostId)
-        // Fall back to a synthetic label when no image was provided —
-        // matches what createSpawnIntent persists, so the same string is
-        // shown in coordinator events, spawn results, and DB rows.
         const imageLabel = s.spec.image ?? `local-build:${s.spec.kind}`
         if (!host) {
           return {
@@ -777,16 +920,162 @@ export const run = async (
             intentId: null,
             primitiveKind: s.spec.kind,
             image: imageLabel,
-            error: msg,
+            error: imageLabel ? msg : msg,
           }
         }
       })
     ),
   ])
 
-  emit({ type: 'status', message: 'Synthesizing...' })
+  return { oracleResponses, dispatchResults, readResults, spawnResults }
+}
 
-  const secondPrompt = buildSecondPassPrompt(profile, oracleResponses, dispatchResults, readResults, spawnResults, history, message)
+// Single hot-path used by both `run()` (fresh turn) and `resumeRun()` (after
+// an approval window). Loops through stages until the model emits no commands
+// or we hit STAGE_BUDGET stages this window. On budget exhaustion we save a
+// continuation and emit `stages_paused`. On no-commands we either return the
+// stage-1 prose directly (zero-command turn) or run the synthesis pass.
+const runMultiStage = async (
+  state: RuntimeState,
+  emit: (event: CoordinatorEvent) => void,
+  resumeFrom: ContinuationState | null,
+): Promise<{ text: string; trailer: TurnTrailer; paused: boolean; accumulator: StageAccumulator }> => {
+  const accumulator = resumeFrom?.accumulator ?? newAccumulator()
+  let firstPassTrailerSum = resumeFrom?.firstPassTrailer ?? zeroTrailer()
+  const stagesUsedTotalAtStart = resumeFrom?.stagesUsedTotal ?? 0
+  let stagesUsedThisWindow = 0
+
+  while (true) {
+    stagesUsedThisWindow++
+    const stage = stagesUsedTotalAtStart + stagesUsedThisWindow
+    emit({ type: 'stage_start', stage, window: stagesUsedThisWindow })
+
+    const firstPassPrompt = buildFirstPassPrompt(
+      state.profile,
+      state.oracleList,
+      state.developerList,
+      state.spawnerHostList,
+      state.history,
+      state.message,
+      accumulatorEmpty(accumulator) ? null : accumulator,
+      stage,
+    )
+    const { text, trailer } = await runFirstPassDirect(firstPassPrompt)
+    firstPassTrailerSum = addTrailer(firstPassTrailerSum, trailer)
+
+    const queries = parseQueryCommands(text)
+    const dispatches = parseDispatchCommands(text)
+    const reads = parseReadCommands(text)
+    const spawns = parseSpawnCommands(text)
+    const totalCommands = queries.length + dispatches.length + reads.length + spawns.length
+
+    logger.info({
+      stage,
+      stagesUsedThisWindow,
+      queriesFound: queries.length,
+      dispatchesFound: dispatches.length,
+      readsFound: reads.length,
+      spawnsFound: spawns.length,
+      outputPreview: text.slice(0, 800),
+      stageCostUsd: trailer.cost_usd,
+      stageTokens: { input: trailer.input_tokens, output: trailer.output_tokens },
+    }, 'Coordinator stage decision')
+
+    if (totalCommands === 0) {
+      // Stage 1 with no commands: the prose IS the answer (chat-style turn,
+      // no oracle/dispatch needed). Skip synthesis; emit the text directly.
+      if (stage === 1) {
+        logger.info('Coordinator answered directly')
+        emit({ type: 'text', text })
+        emit({ type: 'done' })
+        return {
+          text,
+          trailer: { first_pass: firstPassTrailerSum, second_pass: null },
+          paused: false,
+          accumulator,
+        }
+      }
+      // Stage 2+ with no commands: model is signalling "I have what I need" —
+      // discard this stage's output and run synthesis with everything
+      // accumulated.
+      break
+    }
+
+    if (queries.length > 0) {
+      emit({ type: 'status', message: `Querying ${queries.length} oracle(s): ${queries.map((q) => q.domain).join(', ')}` })
+    }
+    if (reads.length > 0) {
+      emit({ type: 'status', message: `Reading ${reads.length} run report(s)` })
+    }
+    if (spawns.length > 0) {
+      emit({ type: 'status', message: `Proposing ${spawns.length} spawn(s)` })
+    }
+
+    const stageResults = await executeStage({ queries, dispatches, reads, spawns }, emit)
+    accumulator.oracleResponses.push(...stageResults.oracleResponses)
+    accumulator.dispatchResults.push(...stageResults.dispatchResults)
+    accumulator.readResults.push(...stageResults.readResults)
+    accumulator.spawnResults.push(...stageResults.spawnResults)
+
+    // Budget exhausted — save state, emit pause, return without synthesis.
+    // The frontend renders an "approve next stages" button; clicking it
+    // POSTs to /continue, which calls resumeRun() with another window.
+    if (stagesUsedThisWindow >= STAGE_BUDGET) {
+      const continuationId = randomUUID()
+      pendingContinuations.set(continuationId, {
+        runtime: state,
+        accumulator,
+        firstPassTrailer: firstPassTrailerSum,
+        stagesUsedTotal: stage,
+        createdAt: Date.now(),
+      })
+      const timer = setTimeout(() => pendingContinuations.delete(continuationId), CONTINUATION_TTL_MS)
+      timer.unref?.()
+
+      const hintParts: string[] = []
+      if (stageResults.oracleResponses.length) hintParts.push(`${stageResults.oracleResponses.length} oracle(s)`)
+      if (stageResults.dispatchResults.length) hintParts.push(`${stageResults.dispatchResults.length} dispatch(es)`)
+      if (stageResults.readResults.length) hintParts.push(`${stageResults.readResults.length} read(s)`)
+      if (stageResults.spawnResults.length) hintParts.push(`${stageResults.spawnResults.length} spawn(s)`)
+      const pendingHint = hintParts.length
+        ? `Last stage ran ${hintParts.join(', ')}. Coordinator may want more — approve to continue.`
+        : 'Coordinator may want more stages — approve to continue.'
+
+      logger.info({ continuationId, stage, accumulator: {
+        oracles: accumulator.oracleResponses.length,
+        dispatches: accumulator.dispatchResults.length,
+        reads: accumulator.readResults.length,
+        spawns: accumulator.spawnResults.length,
+      } }, 'Coordinator paused for approval')
+
+      emit({
+        type: 'stages_paused',
+        continuationId,
+        stagesUsedThisWindow,
+        stagesUsedTotal: stage,
+        pendingHint,
+      })
+      emit({ type: 'done' })
+      return {
+        text: '',
+        trailer: { first_pass: firstPassTrailerSum, second_pass: null },
+        paused: true,
+        accumulator,
+      }
+    }
+  }
+
+  // Synthesis
+  emit({ type: 'status', message: 'Synthesizing...' })
+  const secondPrompt = buildSecondPassPrompt(
+    state.profile,
+    accumulator.oracleResponses,
+    accumulator.dispatchResults,
+    accumulator.readResults,
+    accumulator.spawnResults,
+    state.history,
+    state.message,
+  )
   const { text: fullText, trailer: secondPassTrailer } = await runSecondPassDirect(secondPrompt, (text) => {
     emit({ type: 'text', text })
   })
@@ -798,5 +1087,46 @@ export const run = async (
   }, 'Coordinator second pass complete')
 
   emit({ type: 'done' })
-  return { text: fullText, trailer: { first_pass: firstPassTrailer, second_pass: secondPassTrailer } }
+  return {
+    text: fullText,
+    trailer: { first_pass: firstPassTrailerSum, second_pass: secondPassTrailer },
+    paused: false,
+    accumulator,
+  }
+}
+
+const buildRuntimeState = async (message: string, history: ChatMessage[]): Promise<RuntimeState> => {
+  const [profile, oracleList, developerList, spawnerHostList] = await Promise.all([
+    loadUserProfile(),
+    loadOracleList(),
+    loadDeveloperList(),
+    loadSpawnerHostList(),
+  ])
+  return { message, history, profile, oracleList, developerList, spawnerHostList }
+}
+
+export const run = async (
+  message: string,
+  history: ChatMessage[],
+  emit: (event: CoordinatorEvent) => void,
+): Promise<{ text: string; trailer: TurnTrailer; paused: boolean; accumulator: StageAccumulator }> => {
+  const state = await buildRuntimeState(message, history)
+  emit({ type: 'status', message: `Deciding (${state.oracleList.length} oracles, ${state.developerList.length} devs, ${state.spawnerHostList.length} hosts available)...` })
+  return runMultiStage(state, emit, null)
+}
+
+// Resume a paused multi-stage turn. Consumes the continuation from the
+// in-memory store (one-shot) so a stale tab can't replay it. Throws if the
+// id is unknown — typically a process restart or TTL expiry.
+export const resumeRun = async (
+  continuationId: string,
+  emit: (event: CoordinatorEvent) => void,
+): Promise<{ text: string; trailer: TurnTrailer; paused: boolean; accumulator: StageAccumulator }> => {
+  const cont = pendingContinuations.get(continuationId)
+  if (!cont) {
+    throw new Error(`Continuation "${continuationId}" not found (expired or process restarted)`)
+  }
+  pendingContinuations.delete(continuationId)
+  emit({ type: 'status', message: `Resuming (stage ${cont.stagesUsedTotal + 1}+)...` })
+  return runMultiStage(cont.runtime, emit, cont)
 }
