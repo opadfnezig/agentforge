@@ -1082,6 +1082,11 @@ const DispatchBadge = memo(function DispatchBadge({ dispatch }: { dispatch: Disp
 // terminal state.
 const SPAWN_TERMINAL_STATES = new Set<Spawn['state']>(['destroyed'])
 const SPAWN_DEAD_STATES = new Set<Spawn['state']>(['crashed', 'orphaned'])
+const TERMINAL_INTENT_STATUSES = new Set<'pending' | 'approved' | 'cancelled' | 'failed'>([
+  'approved',
+  'cancelled',
+  'failed',
+])
 
 const SpawnBadge = memo(function SpawnBadge({ spawn }: { spawn: SpawnInfo }) {
   const [live, setLive] = useState<Spawn | null>(null)
@@ -1090,6 +1095,33 @@ const SpawnBadge = memo(function SpawnBadge({ spawn }: { spawn: SpawnInfo }) {
   const [intentStatus, setIntentStatus] = useState<'pending' | 'approved' | 'cancelled' | 'failed'>(
     spawn.pending ? 'pending' : spawn.queued ? 'pending' : 'approved'
   )
+
+  // Reconcile intent status from the server on mount. Without this the badge
+  // initializes from the SPAWNS sentinel cache (which preserves the optimistic
+  // 'pending' state from the original turn) and never advances after a reload,
+  // even if the intent has since been approved / cancelled / failed. Mirrors
+  // DispatchBadge's run-poll pattern.
+  useEffect(() => {
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const tick = async () => {
+      try {
+        const intent = await spawnersApi.getIntent(spawn.spawnerHostId, spawn.spawnIntentId)
+        if (cancelled) return
+        setIntentStatus(intent.status)
+        if (!TERMINAL_INTENT_STATUSES.has(intent.status)) {
+          timer = setTimeout(tick, 1500)
+        }
+      } catch {
+        if (!cancelled) timer = setTimeout(tick, 3000)
+      }
+    }
+    tick()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [spawn.spawnerHostId, spawn.spawnIntentId])
 
   // Once approved, poll the spawn row until it reaches a terminal/dead state.
   // The row only exists after the spawner has returned successfully — until

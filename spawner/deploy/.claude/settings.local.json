@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker network *)",
+      "Bash(NTFR_HOST_ID=test docker compose config)"
+    ]
+  }
+}

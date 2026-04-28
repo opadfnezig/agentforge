@@ -29,6 +29,47 @@ const sendSSE = (res: any, event: CoordinatorEvent) => {
   res.write(`data: ${JSON.stringify(event)}\n\n`)
 }
 
+// Transform the persisted assistant message before it goes back into the
+// coordinator's prompt as conversation history.
+//
+// ORACLES and READS are stripped entirely: oracles must be re-queried each turn,
+// and read results are pull-only (auto-injecting prior reports would recreate
+// the auto-injection problem we explicitly avoided).
+//
+// DISPATCHES are NOT stripped — the runId UUID inside the sentinel JSON is the
+// only durable carrier of the assigned id across turns. Synthesis prose
+// typically describes the dispatch without quoting the UUID, so without this
+// rewrite the coordinator can never recover the runId for a later [read, run-id].
+// We replace the JSON sentinel with a compact line per dispatch the model can
+// read naturally.
+//
+// SPAWNS share the same structural pattern but no coordinator command currently
+// consumes spawnIntentId, so the sentinel stays stripped; revisit if a
+// spawn-status read primitive is added.
+const rewriteSentinelsForHistory = (content: string): string => {
+  let out = content
+    .replace(/\n*<!--ORACLES:[\s\S]*?:ORACLES-->\s*/g, '')
+    .replace(/\n*<!--READS:[\s\S]*?:READS-->\s*/g, '')
+    .replace(/\n*<!--SPAWNS:[\s\S]*?:SPAWNS-->\s*/g, '')
+  out = out.replace(/\n*<!--DISPATCHES:([\s\S]*?):DISPATCHES-->\s*/g, (_, json) => {
+    try {
+      const items = JSON.parse(json) as Array<{
+        developer: string
+        mode: string
+        runId: string
+      }>
+      if (!Array.isArray(items) || items.length === 0) return ''
+      const lines = items.map(
+        (d) => `- developer=${d.developer} mode=${d.mode} runId=${d.runId}`
+      )
+      return `\n\n[Dispatches emitted in this turn (use runId in [read, run-id]):\n${lines.join('\n')}]`
+    } catch {
+      return ''
+    }
+  })
+  return out
+}
+
 // --- Chat CRUD ---
 
 coordinatorRouter.get('/chats', async (_req, res, next) => {
@@ -136,15 +177,7 @@ coordinatorRouter.post('/chats/:id/message', async (req, res, next) => {
     const priorMessages = await chatDb.getMessages(chat.id)
     const history = priorMessages.map((m) => ({
       role: m.role,
-      // Strip persisted oracle/dispatch/read sentinels so they don't leak into
-      // the next prompt. Reads in particular are pull-only — re-injecting prior
-      // read results would recreate the auto-injection problem we explicitly
-      // avoided. The coordinator must re-issue [read, ...] if it needs the data.
-      content: m.content
-        .replace(/\n*<!--ORACLES:[\s\S]*?:ORACLES-->\s*/g, '')
-        .replace(/\n*<!--DISPATCHES:[\s\S]*?:DISPATCHES-->\s*/g, '')
-        .replace(/\n*<!--READS:[\s\S]*?:READS-->\s*/g, '')
-        .replace(/\n*<!--SPAWNS:[\s\S]*?:SPAWNS-->\s*/g, ''),
+      content: rewriteSentinelsForHistory(m.content),
     }))
 
     await chatDb.addMessage(chat.id, 'user', message)

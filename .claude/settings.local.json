@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose *)",
+      "Bash(docker exec *)",
+      "Bash(curl -sS -X POST http://localhost:3001/api/spawners -H 'content-type: application/json' -d '{\"hostId\":\"host-test-1\",\"name\":\"Test Host\",\"baseUrl\":\"http://10.0.0.99:9898\"}')",
+      "Bash(curl -sS http://localhost:3001/api/spawners)",
+      "Bash(curl -sS -X POST http://localhost:3001/api/spawners/host-test-1/events -H 'content-type: application/json' -d '{\"event_id\":\"22222222-2222-4222-8222-222222222222\",\"primitive_name\":\"dev-alpha\",\"primitive_kind\":\"developer\",\"state\":\"creating\",\"prev_state\":null,\"timestamp\":\"2026-04-25T12:00:00.000Z\",\"host_id\":\"host-test-1\",\"payload\":{\"image\":\"ghcr.io/x/y:tag\",\"container_id\":null}}')",
+      "Bash(curl -sS -X POST http://localhost:3001/api/spawners/host-test-1/events -H 'content-type: application/json' -d '{\"event_id\":\"22222222-2222-4222-8222-222222222222\",\"primitive_name\":\"dev-alpha\",\"primitive_kind\":\"developer\",\"state\":\"creating\",\"prev_state\":null,\"timestamp\":\"2026-04-25T12:00:00.000Z\",\"host_id\":\"host-test-1\",\"payload\":{}}')",
+      "Bash(curl -sS -X POST http://localhost:3001/api/spawners/host-test-1/events -H 'content-type: application/json' -d '{\"event_id\":\"33333333-3333-4333-8333-333333333333\",\"primitive_name\":\"dev-alpha\",\"primitive_kind\":\"developer\",\"state\":\"running\",\"prev_state\":\"creating\",\"timestamp\":\"2026-04-25T12:00:05.000Z\",\"host_id\":\"host-test-1\",\"payload\":{\"image\":\"ghcr.io/x/y:tag\",\"container_id\":\"abc123\"}}')",
+      "Bash(curl -sS http://localhost:3001/api/spawners/b196136d-51e4-48ab-8cca-9d30d31886d2/spawns)",
+      "Bash(curl -sS -w \"HTTP_STATUS=%{http_code}\\\\n\" -X POST http://localhost:3001/api/spawners/host-no-such/events -H 'content-type: application/json' -d '{\"event_id\":\"44444444-4444-4444-8444-444444444444\",\"primitive_name\":\"x\",\"primitive_kind\":\"developer\",\"state\":\"creating\",\"prev_state\":null,\"timestamp\":\"2026-04-25T12:00:05.000Z\",\"host_id\":\"host-no-such\",\"payload\":{}}')",
+      "Bash(curl -sS -w \"HTTP_STATUS=%{http_code}\\\\n\" -X POST http://localhost:3001/api/spawners/b196136d-51e4-48ab-8cca-9d30d31886d2/probe)",
+      "Bash(pnpm build *)",
+      "Bash(git -C /ntfr/agentforge add platform/frontend/lib/api.ts platform/frontend/app/coordinator/page.tsx platform/frontend/app/layout.tsx platform/frontend/app/spawners/ docs/clarify/spawner-frontend-clarify-20260427T192733Z.md)",
+      "Bash(git -C /ntfr/agentforge status)",
+      "Bash(git -C /ntfr/agentforge commit -m ' *)",
+      "Bash(git -C /ntfr/agentforge log --oneline)",
+      "Bash(curl -sS -w '\\\\nHTTP_STATUS=%{http_code}\\\\n' -X POST http://localhost:80/api/spawners/e5a7b70c-d236-47e3-8783-dc213091dbb8/spawn-intents/__TRACKED_VAR__/approve)",
+      "Bash(uuidgen)",
+      "Bash(curl -sS -w '\\\\nHTTP_STATUS=%{http_code}\\\\n' -X POST http://localhost:80/api/spawners/e5a7b70c-d236-47e3-8783-dc213091dbb8/spawn-intents/__TRACKED_VAR__/cancel)",
+      "Bash(curl -sS -w '\\\\nHTTP_STATUS=%{http_code}\\\\n' http://localhost:80/api/spawners/e5a7b70c-d236-47e3-8783-dc213091dbb8/spawns/smoke-dev-2)",
+      "Bash(curl -sS \"http://localhost:80/api/coordinator/chats/1fb875af-831f-4df1-b08f-b071bca7cf70\")",
+      "Bash(grep -oE 'SPAWNS:[^\"]{1,300}')",
+      "Bash(curl -sS \"http://localhost:80/api/spawners/e5a7b70c-d236-47e3-8783-dc213091dbb8/spawn-intents\")",
+      "Bash(curl -sS -w \"%{http_code}\\\\n\" -X DELETE http://localhost:80/api/coordinator/chats/1fb875af-831f-4df1-b08f-b071bca7cf70)",
+      "Bash(curl -sS -w \"%{http_code}\\\\n\" -X DELETE http://localhost:80/api/spawners/e5a7b70c-d236-47e3-8783-dc213091dbb8)",
+      "Bash(pnpm exec *)",
+      "Bash(echo \"be exit=$?\")",
+      "Bash(echo \"fe exit=$?\")",
+      "Bash(git -C /ntfr/agentforge add platform/backend/src/db/migrations/011_spawn_intents.ts platform/backend/src/db/connection.ts platform/backend/src/db/queries/spawners.ts platform/backend/src/routes/spawners-routes.ts platform/backend/src/routes/coordinator-routes.ts platform/backend/src/schemas/spawner.ts platform/backend/src/services/coordinator.ts platform/frontend/lib/api.ts platform/frontend/app/coordinator/page.tsx)",
+      "Bash(git -C /ntfr/agentforge status --short)",
+      "Bash(npx tsc *)",
+      "Bash(curl -sS -X POST http://127.0.0.1:9898/v1/spawns/agentforge-dev/destroy)"
+    ]
+  }
+}
