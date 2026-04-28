@@ -185,7 +185,6 @@ Modes:
 To spawn a new primitive (developer or researcher container) on one of the registered hosts:
 [spawn, host-id, primitive-name]
 kind: developer
-image: ghcr.io/org/agent:latest
 env:
   FOO: bar
 mounts:
@@ -196,7 +195,7 @@ command: ["node", "x.js"]
 args: ["--flag"]
 [end]
 
-The body is YAML. Required fields: \`kind\` (developer | researcher) and \`image\`. All other fields are optional. \`primitive-name\` must match \`[a-z0-9][a-z0-9_-]*\` and is unique per host. Spawning a primitive does NOT register a developer in this app — that's a separate manual step (or a future automation). Use [spawn, ...] when the user explicitly asks for a new container; do not spawn opportunistically.
+The body is YAML. Required field: \`kind\` (developer | researcher). \`image\` is optional — when omitted, the spawner builds the primitive from the host's local source tree based on \`kind\` (e.g. developer → /ntfr/agentforge/developer). Only set \`image\` if you have a real registry tag in mind; otherwise leave it out. All other fields are optional. \`primitive-name\` must match \`[a-z0-9][a-z0-9_-]*\` and is unique per host. Spawning a primitive does NOT register a developer in this app — that's a separate manual step (or a future automation). Use [spawn, ...] when the user explicitly asks for a new container; do not spawn opportunistically.
 
 To pull the report for a previously dispatched run by its UUID:
 [read, run-id]
@@ -726,13 +725,17 @@ export const run = async (
           }
         }
         const host = hostsByHostId.get(s.hostId)
+        // Fall back to a synthetic label when no image was provided —
+        // matches what createSpawnIntent persists, so the same string is
+        // shown in coordinator events, spawn results, and DB rows.
+        const imageLabel = s.spec.image ?? `local-build:${s.spec.kind}`
         if (!host) {
           return {
             hostId: s.hostId,
             primitiveName: s.primitiveName,
             intentId: null,
             primitiveKind: s.spec.kind,
-            image: s.spec.image,
+            image: imageLabel,
             error: `Spawner host "${s.hostId}" not registered`,
           }
         }
@@ -753,7 +756,7 @@ export const run = async (
             hostId: host.hostId,
             primitiveName: s.spec.name,
             primitiveKind: s.spec.kind,
-            image: s.spec.image,
+            image: imageLabel,
             spawnIntentId: intent.id,
             pending: true,
             queued: false,
@@ -763,7 +766,7 @@ export const run = async (
             primitiveName: s.primitiveName,
             intentId: intent.id,
             primitiveKind: s.spec.kind,
-            image: s.spec.image,
+            image: imageLabel,
             error: null,
           }
         } catch (err) {
@@ -773,7 +776,7 @@ export const run = async (
             primitiveName: s.primitiveName,
             intentId: null,
             primitiveKind: s.spec.kind,
-            image: s.spec.image,
+            image: imageLabel,
             error: msg,
           }
         }

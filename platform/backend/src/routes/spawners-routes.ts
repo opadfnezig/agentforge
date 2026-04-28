@@ -5,6 +5,7 @@ import {
   lifecycleEventSchema,
 } from '../schemas/spawner.js'
 import * as queries from '../db/queries/spawners.js'
+import * as developerQueries from '../db/queries/developers.js'
 import {
   SpawnerClient,
   SpawnerHttpError,
@@ -211,10 +212,33 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
       throw new AppError(404, 'spawner host not found', 'SPAWNER_HOST_NOT_FOUND')
     }
 
+    // For developer-kind spawns: create the backing developer row up front
+    // so we can pass DEVELOPER_ID + DEVELOPER_SECRET to the container as env.
+    // The developer process inside the container connects back to the
+    // backend WS with these credentials and registers itself. COORDINATOR_URL
+    // and WORKSPACE_PATH are injected by the spawner per kind.
+    let createdDeveloperId: string | null = null
+    let spec = intent.spec
+    if (intent.primitiveKind === 'developer') {
+      const dev = await developerQueries.createDeveloper({
+        name: intent.primitiveName,
+        workspacePath: '/workspace',
+      })
+      createdDeveloperId = dev.id
+      spec = {
+        ...intent.spec,
+        env: {
+          ...(intent.spec.env ?? {}),
+          DEVELOPER_ID: dev.id,
+          DEVELOPER_SECRET: dev.secret,
+        },
+      }
+    }
+
     const client = new SpawnerClient({ baseUrl: host.baseUrl, timeoutMs: 30_000 })
     let primitive
     try {
-      primitive = await client.spawn(intent.spec)
+      primitive = await client.spawn(spec)
     } catch (err) {
       const message =
         err instanceof SpawnerHttpError
@@ -228,6 +252,19 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
         status: 'failed',
         errorMessage: message,
       })
+      // Mark the developer row destroyed (we never delete developer rows;
+      // we want a record of failed spawn attempts in history too). Status
+      // 'destroyed' frees the name for re-use by a future spawn.
+      if (createdDeveloperId) {
+        try {
+          await developerQueries.updateDeveloper(createdDeveloperId, { status: 'destroyed' })
+        } catch (cleanupErr) {
+          logger.warn(
+            { developerId: createdDeveloperId, err: cleanupErr },
+            'Failed to mark developer row destroyed after spawner error'
+          )
+        }
+      }
       logger.warn(
         { intentId: intent.id, hostId: host.hostId, primitive: intent.primitiveName, err: message },
         'Spawn approval failed at spawner'

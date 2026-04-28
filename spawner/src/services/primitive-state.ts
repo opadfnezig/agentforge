@@ -49,11 +49,15 @@ export const listStates = async (): Promise<PrimitiveState_t[]> => {
 
 export const initialState = (req: SpawnRequest): PrimitiveState_t => {
   const now = new Date().toISOString()
+  // For local builds (no image given) we still need a non-empty image
+  // label for events/listings. Synthesize the same tag the spawner pins
+  // in the generated compose service block.
+  const imageLabel = req.image ?? `ntfr-${req.kind}:${req.name}`
   return {
     name: req.name,
     kind: req.kind as PrimitiveKind,
     state: 'creating',
-    image: req.image,
+    image: imageLabel,
     container_id: null,
     created_at: now,
     updated_at: now,

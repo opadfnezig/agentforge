@@ -72,6 +72,8 @@ export const spawnPrimitive = async (req: SpawnRequest): Promise<PrimitiveState_
       delete rollback.services[req.name]
       await writeCompose(rollback)
       // Mark the primitive crashed and emit an event so the server knows.
+      // The lifecycle event is persisted in the outbox DB independently of
+      // the primitive dir, so removing the dir below does not lose it.
       const cur = await readState(req.name)
       if (cur) {
         await recordTransition(req.name, 'crashed', {
@@ -79,6 +81,10 @@ export const spawnPrimitive = async (req: SpawnRequest): Promise<PrimitiveState_
           stderr: up.stderr.slice(0, 500),
         })
       }
+      // Roll back the primitive dir too: the container never came up, so
+      // there is nothing to preserve, and leaving state.json behind would
+      // permanently block re-using this name (PRIMITIVE_EXISTS on retry).
+      await removePrimitiveDir(req.name)
       throw new SpawnError(
         500,
         `docker compose up failed: ${up.stderr.slice(0, 300)}`,

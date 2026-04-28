@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-export const developerStatusSchema = z.enum(['offline', 'idle', 'busy', 'error'])
+export const developerStatusSchema = z.enum(['offline', 'idle', 'busy', 'error', 'destroyed'])
 export const runModeSchema = z.enum(['implement', 'clarify'])
 export const runStatusSchema = z.enum([
   'pending',

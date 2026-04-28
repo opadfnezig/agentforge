@@ -1,5 +1,5 @@
 import { v4 as uuid } from 'uuid'
-import { db, DbSpawnerHost, DbSpawn, DbSpawnEvent, DbSpawnIntent } from '../connection.js'
+import { db, DbSpawnerHost, DbSpawn, DbSpawnEvent, DbSpawnIntent, DbDeveloper } from '../connection.js'
 import {
   SpawnerHost,
   CreateSpawnerHost,
@@ -227,6 +227,17 @@ export const ingestLifecycleEvent = async (
         updated_at: new Date(),
       })
 
+    // Side effect: when a developer-kind primitive transitions to
+    // `destroyed`, flag the matching developer row so its slug can be
+    // re-used and run history is preserved. We never delete developer
+    // rows — the destroyed status is the audit signal.
+    if (event.state === 'destroyed' && event.primitive_kind === 'developer') {
+      await trx<DbDeveloper>('developers')
+        .where({ name: event.primitive_name })
+        .whereNot({ status: 'destroyed' })
+        .update({ status: 'destroyed', updated_at: new Date() })
+    }
+
     return { deduped: false, eventRowId }
   })
 }
@@ -294,7 +305,10 @@ export const createSpawnIntent = async (
       spawner_host_id: spawnerHostId,
       primitive_name: spec.name,
       primitive_kind: spec.kind,
-      image: spec.image,
+      // image is now optional in the spec (kind-based local build); the
+      // DB column is still NOT NULL, so synthesize a human-readable label
+      // that makes it obvious in listings that this was a local build.
+      image: spec.image ?? `local-build:${spec.kind}`,
       spec: JSON.stringify(spec) as unknown as Record<string, unknown>,
       status: 'pending',
     })

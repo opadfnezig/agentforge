@@ -147,6 +147,19 @@ export const deleteDeveloper = async (id: string): Promise<boolean> => {
   return count > 0
 }
 
+// Mark every non-destroyed developer with this name as destroyed. Used by
+// the lifecycle ingest when a primitive of kind=developer transitions to
+// `destroyed`. We never delete developer rows — keeping them preserves run
+// history and lets the operator audit who-did-what after the container is
+// gone. The `name` column is non-unique by design, so the same slug can be
+// re-used for a new developer once the previous one has been destroyed.
+export const markDeveloperDestroyedByName = async (name: string): Promise<number> => {
+  return db<DbDeveloper>('developers')
+    .where({ name })
+    .whereNot({ status: 'destroyed' })
+    .update({ status: 'destroyed', updated_at: new Date() })
+}
+
 // --- Run CRUD ---
 
 export const createRun = async (

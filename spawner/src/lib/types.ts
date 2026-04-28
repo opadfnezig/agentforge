@@ -18,7 +18,10 @@ export const spawnRequestSchema = z.object({
   name: primitiveNameSchema,
   kind: z.enum(PRIMITIVE_KINDS),
   workdir: z.string().optional(), // subpath under ~/ntfr/<name>/; defaults to "workspace"
-  image: z.string().min(1),
+  // If omitted, the spawner builds the primitive from the hardcoded
+  // per-kind context under /ntfr/agentforge (see KIND_BUILD_CONTEXT in
+  // lib/compose-file.ts). Will move to a registry once we have one.
+  image: z.string().min(1).optional(),
   env: z.record(z.string()).optional(),
   mounts: z
     .array(

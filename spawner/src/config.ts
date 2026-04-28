@@ -8,6 +8,14 @@ const envSchema = z.object({
   NTFR_PORT: z.coerce.number().int().positive().default(9898),
   NTFR_WORKDIR: z.string().default(join(homedir(), 'ntfr')),
   NTFR_SERVER_URL: z.string().url().optional(),
+  // WS base URL for primitives that need to dial back to the coordinator
+  // (developer kind today). When unset we derive it from NTFR_SERVER_URL by
+  // swapping http→ws and stripping any trailing /api segment.
+  NTFR_COORDINATOR_URL: z.string().url().optional(),
+  // Existing docker network that primitives must join so they can reach
+  // the backend by service name. Same default as the spawner's own deploy
+  // compose so the two stay aligned out of the box.
+  NTFR_PRIMITIVE_NETWORK: z.string().min(1).default('agentforge_agentforge-net'),
   NTFR_LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   DOCKER_SOCKET: z.string().default('/var/run/docker.sock'),
   NTFR_LIFECYCLE_RETRY_MAX: z.coerce.number().int().nonnegative().default(5),

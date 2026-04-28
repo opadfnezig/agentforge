@@ -53,7 +53,10 @@ export const spawnSpecSchema = z.object({
     .regex(/^[a-z0-9][a-z0-9_-]*$/, 'must match [a-z0-9][a-z0-9_-]*'),
   kind: primitiveKindSchema,
   workdir: z.string().optional(),
-  image: z.string().min(1),
+  // Optional — when omitted, the spawner builds the primitive from the
+  // hardcoded per-kind context under /ntfr/agentforge. Will move to a
+  // registry once we have one.
+  image: z.string().min(1).optional(),
   env: z.record(z.string()).optional(),
   mounts: z
     .array(
