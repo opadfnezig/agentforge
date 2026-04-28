@@ -60,6 +60,25 @@ const buildKindEnv = (kind: string): Record<string, string> => {
   return {}
 }
 
+// Static volumes the spawner injects per primitive kind. Resolved by the
+// host docker daemon, so source paths are HOST paths (the spawner runs in
+// a container itself but `docker compose up` is executed by the daemon).
+// Prepended to user mounts so caller-supplied volumes win on path
+// collisions (later compose-volume entries take precedence in docker).
+const buildKindVolumes = (kind: string): string[] => {
+  if (kind === 'developer') {
+    return [
+      // Live OAuth token mirrored by claude-token-broker on the host.
+      '/var/lib/claude-creds/credentials.json:/home/agent/.claude/.credentials.json:ro',
+      // SSH keys for git over SSH. The container entrypoint copies these
+      // from /mnt/ssh-src into /home/agent/.ssh with 600/700 perms; the
+      // mount stays RO so the original keys can't be modified.
+      '/root/.ssh:/mnt/ssh-src:ro',
+    ]
+  }
+  return []
+}
+
 interface ComposeNetwork {
   external?: boolean
   name?: string
@@ -123,6 +142,7 @@ export const buildServiceBlock = (req: SpawnRequest): ComposeService => {
     `./${req.name}/workspace:/workspace:rw`,
     `./${req.name}/.meta:/meta:ro`,
   ]
+  const kindVolumes = buildKindVolumes(req.kind)
   const extraVolumes = (req.mounts ?? []).map((m) => {
     const ro = m.readOnly ? ':ro' : ':rw'
     return `${m.source}:${m.target}${ro}`
@@ -131,7 +151,7 @@ export const buildServiceBlock = (req: SpawnRequest): ComposeService => {
   const svc: ComposeService = {
     container_name: `ntfr-${req.name}`,
     restart: 'always',
-    volumes: [...baseVolumes, ...extraVolumes],
+    volumes: [...baseVolumes, ...kindVolumes, ...extraVolumes],
     // Join the same external docker network the spawner itself is on, so
     // the primitive can reach `backend` (and other named services) by
     // hostname. Without this, primitives land on the auto-created
