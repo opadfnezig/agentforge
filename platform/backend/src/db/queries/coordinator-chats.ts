@@ -83,6 +83,14 @@ export const deleteChat = async (id: string): Promise<boolean> => {
   return count > 0
 }
 
+export const updateChatTitle = async (id: string, title: string): Promise<Chat | null> => {
+  const [row] = await db<DbCoordinatorChat>('coordinator_chats')
+    .where({ id })
+    .update({ title, updated_at: new Date() })
+    .returning('*')
+  return row ? toChat(row) : null
+}
+
 export interface TouchChatAggregates {
   addCostUsd?: number
   addDurationMs?: number

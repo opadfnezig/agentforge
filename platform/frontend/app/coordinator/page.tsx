@@ -225,6 +225,20 @@ export default function CoordinatorPage() {
     }
   }
 
+  const renameChat = useCallback(async (id: string, name: string): Promise<boolean> => {
+    const trimmed = name.trim()
+    if (!trimmed) return false
+    const res = await fetch(`/api/coordinator/chats/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: trimmed }),
+    })
+    if (!res.ok) return false
+    const updated = (await res.json()) as Chat
+    setChats(prev => prev.map(c => (c.id === id ? { ...c, title: updated.title } : c)))
+    return true
+  }, [])
+
   const handleSave = async (text: string): Promise<boolean> => {
     if (!activeChatId) return false
     setMessages(prev => [...prev, { role: 'user', content: text }])
@@ -562,21 +576,14 @@ export default function CoordinatorPage() {
         </div>
         <div className="flex-1 overflow-y-auto">
           {chats.map(chat => (
-            <div
+            <ChatListRow
               key={chat.id}
-              className={`group flex items-center gap-2 px-3 py-2 cursor-pointer text-sm border-b border-zinc-900 hover:bg-zinc-900 ${
-                activeChatId === chat.id ? 'bg-zinc-900 text-white' : 'text-zinc-400'
-              }`}
-              onClick={() => loadChat(chat.id)}
-            >
-              <span className="flex-1 truncate">{chat.title}</span>
-              <button
-                onClick={(e) => { e.stopPropagation(); deleteChat(chat.id) }}
-                className="opacity-0 group-hover:opacity-100 text-zinc-600 hover:text-red-400 text-xs"
-              >
-                x
-              </button>
-            </div>
+              chat={chat}
+              active={activeChatId === chat.id}
+              onSelect={() => loadChat(chat.id)}
+              onDelete={() => deleteChat(chat.id)}
+              onRename={(name) => renameChat(chat.id, name)}
+            />
           ))}
           {chats.length === 0 && (
             <p className="text-xs text-zinc-600 p-3">No chats yet</p>
@@ -759,6 +766,111 @@ const MessageRow = memo(function MessageRow({ message: msg, isLast, loading, onR
             {loading ? 'Working…' : 'Approve next stages'}
           </Button>
         </div>
+      )}
+    </div>
+  )
+})
+
+interface ChatListRowProps {
+  chat: Chat
+  active: boolean
+  onSelect: () => void
+  onDelete: () => void
+  onRename: (name: string) => Promise<boolean>
+}
+
+const ChatListRow = memo(function ChatListRow({ chat, active, onSelect, onDelete, onRename }: ChatListRowProps) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(chat.title)
+  const [saving, setSaving] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  // Keep the draft in sync with server state when not actively editing —
+  // covers Haiku-generated renames that arrive via the chat-list refetch.
+  useEffect(() => {
+    if (!editing) setDraft(chat.title)
+  }, [chat.title, editing])
+
+  useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus()
+      inputRef.current?.select()
+    }
+  }, [editing])
+
+  const startEdit = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setDraft(chat.title)
+    setEditing(true)
+  }
+
+  const commit = async () => {
+    if (saving) return
+    const next = draft.trim()
+    if (!next || next === chat.title) {
+      setEditing(false)
+      setDraft(chat.title)
+      return
+    }
+    setSaving(true)
+    const ok = await onRename(next)
+    setSaving(false)
+    setEditing(false)
+    if (!ok) setDraft(chat.title)
+  }
+
+  const cancel = () => {
+    setEditing(false)
+    setDraft(chat.title)
+  }
+
+  return (
+    <div
+      className={`group flex items-center gap-2 px-3 py-2 cursor-pointer text-sm border-b border-zinc-900 hover:bg-zinc-900 ${
+        active ? 'bg-zinc-900 text-white' : 'text-zinc-400'
+      }`}
+      onClick={editing ? undefined : onSelect}
+    >
+      {editing ? (
+        <input
+          ref={inputRef}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onClick={(e) => e.stopPropagation()}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              void commit()
+            } else if (e.key === 'Escape') {
+              e.preventDefault()
+              cancel()
+            }
+          }}
+          disabled={saving}
+          className="flex-1 min-w-0 bg-zinc-950 border border-zinc-700 rounded px-1.5 py-0.5 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-500 disabled:opacity-60"
+        />
+      ) : (
+        <span className="flex-1 truncate" title={chat.title}>{chat.title}</span>
+      )}
+      {!editing && (
+        <button
+          type="button"
+          onClick={startEdit}
+          className="opacity-0 group-hover:opacity-100 text-zinc-600 hover:text-zinc-200 text-[10px]"
+          title="Rename chat"
+        >
+          edit
+        </button>
+      )}
+      {!editing && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onDelete() }}
+          className="opacity-0 group-hover:opacity-100 text-zinc-600 hover:text-red-400 text-xs"
+        >
+          x
+        </button>
       )}
     </div>
   )

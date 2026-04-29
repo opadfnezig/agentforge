@@ -3,8 +3,38 @@ import { run, resumeRun, type CoordinatorEvent } from '../services/coordinator.j
 import { mergeIntoState } from '../services/oracle-engine.js'
 import * as oracleQueries from '../db/queries/oracles.js'
 import * as chatDb from '../db/queries/coordinator-chats.js'
+import { chatCompletion } from '../lib/anthropic-oauth.js'
 import { AppError } from '../utils/error-handler.js'
 import { logger } from '../utils/logger.js'
+
+// Cheapest tier — used only for the fire-and-forget chat-naming call after the
+// first user message. Title generation must never delay the SSE stream the
+// user is actively waiting on, so this runs detached from the request handler.
+const CHAT_NAME_MODEL = 'claude-haiku-4-5'
+const CHAT_NAME_SYSTEM_PROMPT =
+  "Generate a 2-3 word title for this chat based on the user's first message. Return only the title, no punctuation, no quotes."
+
+const generateChatNameAsync = (chatId: string, firstMessage: string): void => {
+  void (async () => {
+    try {
+      const result = await chatCompletion({
+        model: CHAT_NAME_MODEL,
+        systemPrompt: CHAT_NAME_SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: firstMessage }],
+        maxTokens: 32,
+      })
+      const title = result.content.trim().replace(/^["'`]+|["'`]+$/g, '').trim().slice(0, 120)
+      if (!title) return
+      await chatDb.updateChatTitle(chatId, title)
+      logger.info({ chatId, title }, 'Chat name generated')
+    } catch (err) {
+      logger.warn(
+        { chatId, error: err instanceof Error ? err.message : String(err) },
+        'Chat name generation failed',
+      )
+    }
+  })()
+}
 
 export const coordinatorRouter = Router()
 
@@ -99,6 +129,20 @@ coordinatorRouter.delete('/chats/:id', async (req, res, next) => {
     const deleted = await chatDb.deleteChat(req.params.id)
     if (!deleted) throw new AppError(404, 'Chat not found', 'NOT_FOUND')
     res.json({ ok: true })
+  } catch (error) { next(error) }
+})
+
+// Rename a chat. Body uses `name` (the user-facing label) but the underlying
+// column has always been `title`; the names are synonyms here.
+coordinatorRouter.patch('/chats/:id', async (req, res, next) => {
+  try {
+    const { name } = req.body ?? {}
+    if (typeof name !== 'string' || !name.trim()) {
+      throw new AppError(400, 'name must be a non-empty string', 'INVALID_INPUT')
+    }
+    const updated = await chatDb.updateChatTitle(req.params.id, name.trim().slice(0, 120))
+    if (!updated) throw new AppError(404, 'Chat not found', 'NOT_FOUND')
+    res.json(updated)
   } catch (error) { next(error) }
 })
 
@@ -252,6 +296,14 @@ coordinatorRouter.post('/chats/:id/message', async (req, res, next) => {
     }))
 
     await chatDb.addMessage(chat.id, 'user', message)
+
+    // Fire-and-forget Haiku title generation on the first user message of a
+    // chat. Detached so it never blocks the SSE stream the user is waiting on;
+    // the new title is picked up the next time the frontend refetches the
+    // chat list (which it does after every send).
+    if (priorMessages.length === 0) {
+      generateChatNameAsync(chat.id, message)
+    }
 
     logger.info({ chatId: chat.id, historyLength: history.length }, 'Coordinator message')
 
