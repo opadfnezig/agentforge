@@ -107,6 +107,10 @@ export default function CoordinatorPage() {
   const [loading, setLoading] = useState(false)
   const [statusText, setStatusText] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
+  // Whether the user is currently pinned to the bottom of the transcript.
+  // Updated on scroll; checked before each auto-scroll so we never yank the
+  // viewport away from the user when they've scrolled up to read history.
+  const isAtBottomRef = useRef(true)
 
   const loadChats = useCallback(async () => {
     const res = await fetch('/api/coordinator/chats')
@@ -167,10 +171,25 @@ export default function CoordinatorPage() {
   useEffect(() => { loadChats() }, [loadChats])
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    const el = scrollRef.current
+    if (!el) return
+    if (isAtBottomRef.current) {
+      el.scrollTop = el.scrollHeight
     }
   }, [messages, statusText])
+
+  // When the user switches chats, re-pin to bottom for the new transcript so
+  // historical messages aren't loaded mid-scroll.
+  useEffect(() => {
+    isAtBottomRef.current = true
+  }, [activeChatId])
+
+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget
+    // 50px tolerance: typical scroll-snap, accommodates sub-pixel rounding and
+    // keeps "near the bottom" aligned with what feels pinned to the user.
+    isAtBottomRef.current = el.scrollHeight - (el.scrollTop + el.clientHeight) <= 50
+  }, [])
 
   // Restore the per-chat draft when the active chat changes.
   useEffect(() => {
@@ -608,7 +627,7 @@ Bonfire architecture now uses 4 stages
           </div>
         ) : (
           <>
-            <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+            <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
               {messages.map((msg, i) => (
                 <MessageRow
                   key={msg.id || i}
