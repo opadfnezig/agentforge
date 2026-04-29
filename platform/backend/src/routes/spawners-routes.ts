@@ -265,12 +265,9 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
       if (!oracleSecret) {
         throw new AppError(500, 'failed to mint oracle secret', 'ORACLE_SECRET_FAILED')
       }
-      // Auto-inject the two persistence mounts every oracle worker needs.
-      // Without these the worker writes to its overlay filesystem and
-      // loses everything on destroy (= the "oracle didn't want to write
-      // its state" symptom).
-      //
-      // Layout, all under the spawner's workdir:
+      // Oracle mounts are 100% backend-controlled — the coordinator does
+      // not pass paths and any caller-supplied mounts on the spec are
+      // dropped here. Layout, all under the spawner's workdir:
       //   ./oracles/<primitiveName>/memory ↔ /home/agent/.claude/projects/-workspace/memory
       //     (claude memory dir — the worker's actual state)
       //   ./oracles/<primitiveName>/data   ↔ /data
@@ -283,12 +280,14 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
       // without changing the Dockerfile.
       //
       // Sources are relative-to-spawner-workdir; the spawner expands
-      // them when generating compose for the primitive. User-supplied
-      // mounts in the original spec are preserved and take precedence
-      // (defensive: if the operator wants to pin memory elsewhere they
-      // can pass a mount with the same target).
-      const userMountTargets = new Set((intent.spec.mounts ?? []).map((m) => m.target))
-      const defaultMounts = [
+      // them when generating compose for the primitive.
+      if (intent.spec.mounts && intent.spec.mounts.length > 0) {
+        logger.warn(
+          { primitiveName: intent.primitiveName, droppedMounts: intent.spec.mounts.length },
+          'Caller-supplied mounts on oracle spawn dropped — oracle mounts are backend-only'
+        )
+      }
+      const oracleMounts = [
         {
           source: `./oracles/${intent.primitiveName}/memory`,
           target: '/home/agent/.claude/projects/-workspace/memory',
@@ -299,7 +298,7 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
           target: '/data',
           readOnly: false,
         },
-      ].filter((m) => !userMountTargets.has(m.target))
+      ]
 
       spec = {
         ...intent.spec,
@@ -308,7 +307,7 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
           ORACLE_ID: oracle.id,
           ORACLE_SECRET: oracleSecret,
         },
-        mounts: [...(intent.spec.mounts ?? []), ...defaultMounts],
+        mounts: oracleMounts,
       }
     }
 

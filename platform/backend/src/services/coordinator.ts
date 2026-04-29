@@ -232,6 +232,8 @@ The body is YAML. Required field: \`kind\` (developer | researcher | oracle). \`
 - \`kind: oracle\` → \`primitive-name\` MUST be \`oracle-<name>\` (e.g. \`oracle-hearth\`, \`oracle-trading\`). The \`oracle-\` prefix is stripped server-side to derive the underlying oracle name / domain / state_dir; only the container is prefixed.
 - \`kind: developer\` / \`kind: researcher\` → no prefix required.
 
+**Oracle spawns: do NOT include \`mounts:\`** in the YAML body. The backend auto-injects the two persistence mounts every oracle worker needs (memory + data ingest). User-supplied mounts on oracle spawns are dropped server-side. The minimum viable oracle spawn body is just \`kind: oracle\`. Same rule: skip \`image:\` unless you have a real registry tag.
+
 To pull the report for a previously dispatched run by its UUID:
 [read, run-id]
 [end]
