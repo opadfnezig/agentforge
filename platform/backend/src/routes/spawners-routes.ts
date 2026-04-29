@@ -15,6 +15,7 @@ import {
 import { spawnerRegistry } from '../services/spawner-registry.js'
 import { AppError } from '../utils/error-handler.js'
 import { logger } from '../utils/logger.js'
+import { config } from '../config.js'
 
 export const spawnersRouter = Router()
 
@@ -236,20 +237,23 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
       }
     }
 
-    // For oracle-kind spawns: oracle rows are created out-of-band via
-    // POST /api/oracles (each row has its own state_dir and secret). At
-    // approval time we look the row up by name and inject ORACLE_ID +
-    // ORACLE_SECRET. Legacy rows (pre-secret-column) get a secret minted
-    // via ensureOracleSecret. If no oracle matches the spawn name we
-    // refuse — the user must create the oracle first.
+    // For oracle-kind spawns: spawn = create-from-nothing, mirror the
+    // developer flow above. If a row with this name already exists (e.g.
+    // user POSTed /api/oracles first to pin a non-default state_dir) we
+    // reuse it — makes the operation idempotent and respects pre-existing
+    // customisations. Otherwise we create with sensible defaults:
+    // domain = primitiveName, stateDir = ${ORACLE_STATE_DIR}/${primitiveName}.
+    let createdOracleId: string | null = null
     if (intent.primitiveKind === 'oracle') {
-      const oracle = await oracleQueries.getOracleByName(intent.primitiveName)
+      let oracle = await oracleQueries.getOracleByName(intent.primitiveName)
       if (!oracle) {
-        throw new AppError(
-          400,
-          `no oracle row named '${intent.primitiveName}' — create one via POST /api/oracles before spawning`,
-          'ORACLE_NOT_FOUND',
-        )
+        oracle = await oracleQueries.createOracle({
+          name: intent.primitiveName,
+          domain: intent.primitiveName,
+          stateDir: `${config.ORACLE_STATE_DIR}/${intent.primitiveName}`,
+        })
+        createdOracleId = oracle.id
+        logger.info({ oracleId: oracle.id, name: oracle.name, stateDir: oracle.stateDir }, 'Oracle row auto-created on spawn')
       }
       const oracleSecret = await oracleQueries.ensureOracleSecret(oracle.id)
       if (!oracleSecret) {
@@ -292,6 +296,20 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
           logger.warn(
             { developerId: createdDeveloperId, err: cleanupErr },
             'Failed to mark developer row destroyed after spawner error'
+          )
+        }
+      }
+      // If we auto-created the oracle row for this spawn, delete it on
+      // failure so the name is free for a retry. Pre-existing rows (caller
+      // POSTed /api/oracles first) are left alone — they carry config the
+      // user wants kept across attempts.
+      if (createdOracleId) {
+        try {
+          await oracleQueries.deleteOracle(createdOracleId)
+        } catch (cleanupErr) {
+          logger.warn(
+            { oracleId: createdOracleId, err: cleanupErr },
+            'Failed to delete auto-created oracle row after spawner error'
           )
         }
       }
