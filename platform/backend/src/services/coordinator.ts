@@ -213,7 +213,7 @@ Modes:
 - implement: developer will make changes, commit and push if git repo (use for actual work)
 - clarify: developer reads the code and asks clarifying questions, never commits (use when instructions would be ambiguous)
 
-To spawn a new primitive (developer or researcher container) on one of the registered hosts:
+To spawn a new primitive (developer / researcher / oracle container) on one of the registered hosts:
 [spawn, host-id, primitive-name]
 kind: developer
 env:
@@ -226,7 +226,11 @@ command: ["node", "x.js"]
 args: ["--flag"]
 [end]
 
-The body is YAML. Required field: \`kind\` (developer | researcher). \`image\` is optional — when omitted, the spawner builds the primitive from the host's local source tree based on \`kind\` (e.g. developer → /ntfr/agentforge/developer). Only set \`image\` if you have a real registry tag in mind; otherwise leave it out. All other fields are optional. \`primitive-name\` must match \`[a-z0-9][a-z0-9_-]*\` and is unique per host. Spawning a primitive does NOT register a developer in this app — that's a separate manual step (or a future automation). Use [spawn, ...] when the user explicitly asks for a new container; do not spawn opportunistically.
+The body is YAML. Required field: \`kind\` (developer | researcher | oracle). \`image\` is optional — when omitted, the spawner builds the primitive from the host's local source tree based on \`kind\`. Only set \`image\` if you have a real registry tag in mind; otherwise leave it out. All other fields are optional. \`primitive-name\` must match \`[a-z0-9][a-z0-9_-]*\` and is unique per host. Spawning a primitive does NOT register a developer in this app — that's a separate manual step (or a future automation). Use [spawn, ...] when the user explicitly asks for a new container; do not spawn opportunistically.
+
+**Naming convention by kind** — primitive name = container name on the host, so prefix it by kind for grep-ability:
+- \`kind: oracle\` → \`primitive-name\` MUST be \`oracle-<name>\` (e.g. \`oracle-hearth\`, \`oracle-trading\`). The \`oracle-\` prefix is stripped server-side to derive the underlying oracle name / domain / state_dir; only the container is prefixed.
+- \`kind: developer\` / \`kind: researcher\` → no prefix required.
 
 To pull the report for a previously dispatched run by its UUID:
 [read, run-id]
@@ -472,10 +476,11 @@ const parseSpawnCommands = (output: string): ParsedSpawnCommand[] => {
   let match
   while ((match = regex.exec(output)) !== null) {
     const hostId = match[1].trim()
-    const primitiveName = match[2].trim()
+    const rawPrimitiveName = match[2].trim()
     const body = match[3]
     let spec: SpawnSpec | null = null
     let parseError: string | null = null
+    let primitiveName = rawPrimitiveName
     try {
       const parsed = parseYaml(body)
       if (!parsed || typeof parsed !== 'object') {
@@ -485,7 +490,16 @@ const parseSpawnCommands = (output: string): ParsedSpawnCommand[] => {
         if (!kind || !PRIMITIVE_KINDS.includes(kind as PrimitiveKind)) {
           parseError = `kind must be one of ${PRIMITIVE_KINDS.join(' | ')} (got ${JSON.stringify(kind)})`
         } else {
-          // Build a candidate spec and validate via Zod for the rest of the shape.
+          // Naming convention: oracle primitives are container-prefixed
+          // `oracle-<name>` so they're greppable on the host (and the
+          // approve handler strips the prefix to derive the underlying
+          // oracle.name / domain / state_dir). If the model forgot the
+          // prefix, we add it defensively rather than failing — log so we
+          // notice if the prompt drifts.
+          if (kind === 'oracle' && !primitiveName.startsWith('oracle-')) {
+            logger.warn({ primitiveName }, 'Oracle spawn missing oracle- prefix; auto-prefixing')
+            primitiveName = `oracle-${primitiveName}`
+          }
           const candidate = {
             ...(parsed as Record<string, unknown>),
             name: primitiveName,

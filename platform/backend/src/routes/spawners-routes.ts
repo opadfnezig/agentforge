@@ -242,18 +242,24 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
     // user POSTed /api/oracles first to pin a non-default state_dir) we
     // reuse it — makes the operation idempotent and respects pre-existing
     // customisations. Otherwise we create with sensible defaults:
-    // domain = primitiveName, stateDir = ${ORACLE_STATE_DIR}/${primitiveName}.
+    // domain = oracleName, stateDir = ${ORACLE_STATE_DIR}/${oracleName}.
+    //
+    // The primitive (container) name is `oracle-<name>` for grep-ability
+    // on the host; the underlying oracle row uses the unprefixed name as
+    // its identity. Strip the prefix here so DB rows and on-disk state
+    // dirs stay clean (`hearth`, not `oracle-hearth`).
     let createdOracleId: string | null = null
     if (intent.primitiveKind === 'oracle') {
-      let oracle = await oracleQueries.getOracleByName(intent.primitiveName)
+      const oracleName = intent.primitiveName.replace(/^oracle-/, '')
+      let oracle = await oracleQueries.getOracleByName(oracleName)
       if (!oracle) {
         oracle = await oracleQueries.createOracle({
-          name: intent.primitiveName,
-          domain: intent.primitiveName,
-          stateDir: `${config.ORACLE_STATE_DIR}/${intent.primitiveName}`,
+          name: oracleName,
+          domain: oracleName,
+          stateDir: `${config.ORACLE_STATE_DIR}/${oracleName}`,
         })
         createdOracleId = oracle.id
-        logger.info({ oracleId: oracle.id, name: oracle.name, stateDir: oracle.stateDir }, 'Oracle row auto-created on spawn')
+        logger.info({ oracleId: oracle.id, name: oracle.name, primitiveName: intent.primitiveName, stateDir: oracle.stateDir }, 'Oracle row auto-created on spawn')
       }
       const oracleSecret = await oracleQueries.ensureOracleSecret(oracle.id)
       if (!oracleSecret) {
