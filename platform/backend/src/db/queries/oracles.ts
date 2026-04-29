@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto'
 import { db, DbOracle, DbOracleQuery } from '../connection.js'
 import { Oracle, CreateOracle, UpdateOracle, OracleQuery } from '../../schemas/oracle.js'
 import { v4 as uuid } from 'uuid'
@@ -12,10 +13,13 @@ const toOracle = (row: DbOracle): Oracle => ({
   description: row.description,
   stateDir: row.state_dir,
   status: row.status as Oracle['status'],
+  secret: row.secret ?? null,
   config: typeof row.config === 'string' ? JSON.parse(row.config) : row.config,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 })
+
+export const generateSecret = (): string => randomBytes(32).toString('hex')
 
 const toOracleQuery = (row: DbOracleQuery): OracleQuery => ({
   id: row.id,
@@ -37,10 +41,34 @@ export const createOracle = async (data: CreateOracle): Promise<Oracle> => {
       domain: data.domain,
       description: data.description || null,
       state_dir: data.stateDir,
+      secret: generateSecret(),
       config: JSON.stringify(data.config || {}),
     })
     .returning('*')
   return toOracle(row)
+}
+
+export const getOracleByName = async (name: string): Promise<Oracle | null> => {
+  const row = await db<DbOracle>('oracles').where({ name }).first()
+  return row ? toOracle(row) : null
+}
+
+export const getOracleByDomain = async (domain: string): Promise<Oracle | null> => {
+  const row = await db<DbOracle>('oracles').where({ domain }).first()
+  return row ? toOracle(row) : null
+}
+
+// Lazily generate + persist a secret for legacy rows that pre-date the
+// secret column. Returns the up-to-date secret (existing or newly minted).
+export const ensureOracleSecret = async (id: string): Promise<string | null> => {
+  const oracle = await getOracle(id)
+  if (!oracle) return null
+  if (oracle.secret) return oracle.secret
+  const secret = generateSecret()
+  await db<DbOracle>('oracles')
+    .where({ id })
+    .update({ secret, updated_at: new Date() })
+  return secret
 }
 
 export const listOracles = async (): Promise<Oracle[]> => {

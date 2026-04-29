@@ -10,6 +10,7 @@ export const oracleSchema = z.object({
   description: z.string().nullable(),
   stateDir: z.string().min(1),
   status: oracleStatusSchema,
+  secret: z.string().nullable(),
   config: z.record(z.unknown()),
   createdAt: z.date(),
   updatedAt: z.date(),

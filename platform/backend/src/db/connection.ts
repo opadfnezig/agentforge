@@ -131,6 +131,7 @@ export interface DbOracle {
   description: string | null
   state_dir: string
   status: string
+  secret: string | null
   config: Record<string, unknown> | string
   created_at: Date
   updated_at: Date

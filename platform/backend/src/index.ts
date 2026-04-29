@@ -17,7 +17,7 @@ import { editorRouter } from './routes/editor.js'
 import { planeRouter } from './routes/plane.js'
 import { chatRouter } from './routes/chat.js'
 import { scopesRouter } from './routes/scopes.js'
-import { oraclesRouter } from './routes/oracles-routes.js'
+import { oraclesRouter, registerOracleWs } from './routes/oracles-routes.js'
 import { coordinatorRouter } from './routes/coordinator-routes.js'
 import { developersRouter, registerDeveloperWs } from './routes/developers-routes.js'
 import { spawnersRouter } from './routes/spawners-routes.js'
@@ -49,6 +49,7 @@ app.use('/api/projects/:projectId/chat', chatRouter)
 app.use('/api/integrations/plane', planeRouter)
 app.use('/api/scopes', scopesRouter)
 app.use('/api/oracles', oraclesRouter)
+registerOracleWs(app as any)
 app.use('/api/coordinator', coordinatorRouter)
 app.use('/api/developers', developersRouter)
 registerDeveloperWs(app as any)

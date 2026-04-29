@@ -1,10 +1,9 @@
 import { z } from 'zod'
 
-// Oracle has its own lifecycle and isn't spawned via this path; researcher
-// support is scaffolded but the spawner doesn't yet have a runtime image
-// for it. Keeping researcher in the enum so the [spawn, ...] grammar
-// accepts it without future migrations.
-export const PRIMITIVE_KINDS = ['developer', 'researcher'] as const
+// Oracle is now a containerized primitive spawned via this path (same as
+// developer). Researcher support is scaffolded in the enum but the spawner
+// doesn't yet have a runtime image for it.
+export const PRIMITIVE_KINDS = ['developer', 'researcher', 'oracle'] as const
 export const PRIMITIVE_STATES = ['creating', 'running', 'crashed', 'destroyed', 'orphaned'] as const
 export const SPAWN_INTENT_STATUSES = ['pending', 'approved', 'cancelled', 'failed'] as const
 

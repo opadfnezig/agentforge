@@ -197,6 +197,13 @@ To query an oracle for context:
 your specific question
 [end]
 
+Oracles are containerized primitives that serve three modes:
+- read: query memories, returns synthesis. (This is what [query, ...] uses.)
+- write: merge incoming notes into memories. (Driven by [save, oracle-domain] in user-edited assistant messages.)
+- migrate: agent-driven — read files staged in /data, fold into memories, delete originals.
+
+If an oracle is offline (its container hasn't been spawned), [query, ...] returns "[Oracle query failed: …offline…]". Spawn the oracle's container via [spawn, host-id, oracle-name] with \`kind: oracle\` to bring it back online.
+
 To dispatch a developer to execute work:
 [dispatch, developer-name, mode]
 clear detailed instructions for the developer

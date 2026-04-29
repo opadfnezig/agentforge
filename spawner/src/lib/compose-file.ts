@@ -26,6 +26,7 @@ interface ComposeService {
 // registry, switch the spawner to pull-by-tag and remove this map.
 export const KIND_BUILD_CONTEXT: Record<string, string | undefined> = {
   developer: '/ntfr/agentforge/developer',
+  oracle: '/ntfr/agentforge/oracle',
 }
 
 // Derive the WS coordinator URL from NTFR_SERVER_URL when no explicit
@@ -48,10 +49,20 @@ const deriveCoordinatorUrl = (): string | undefined => {
 
 // Static env vars the spawner injects per primitive kind. User-provided
 // env in the spawn request always wins (we merge user last). DEVELOPER_ID
-// + DEVELOPER_SECRET are intentionally NOT here — those are caller-supplied
-// because they require backend-side developer registration.
+// + DEVELOPER_SECRET (and ORACLE_ID + ORACLE_SECRET) are intentionally NOT
+// here — those are caller-supplied because they require backend-side
+// primitive registration.
 const buildKindEnv = (kind: string): Record<string, string> => {
   if (kind === 'developer') {
+    const env: Record<string, string> = { WORKSPACE_PATH: '/workspace' }
+    const coord = deriveCoordinatorUrl()
+    if (coord) env.COORDINATOR_URL = coord
+    return env
+  }
+  if (kind === 'oracle') {
+    // WORKSPACE_PATH is pinned to /workspace so the claude CLI's auto-memory
+    // dir resolves to ~/.claude/projects/-workspace/memory inside the
+    // container — that path is what the host volume targets.
     const env: Record<string, string> = { WORKSPACE_PATH: '/workspace' }
     const coord = deriveCoordinatorUrl()
     if (coord) env.COORDINATOR_URL = coord
@@ -65,7 +76,7 @@ const buildKindEnv = (kind: string): Record<string, string> => {
 // a container itself but `docker compose up` is executed by the daemon).
 // Prepended to user mounts so caller-supplied volumes win on path
 // collisions (later compose-volume entries take precedence in docker).
-const buildKindVolumes = (kind: string): string[] => {
+const buildKindVolumes = (kind: string, name: string): string[] => {
   if (kind === 'developer') {
     return [
       // Live OAuth token mirrored by claude-token-broker on the host.
@@ -74,6 +85,20 @@ const buildKindVolumes = (kind: string): string[] => {
       // from /mnt/ssh-src into /home/agent/.ssh with 600/700 perms; the
       // mount stays RO so the original keys can't be modified.
       '/root/.ssh:/mnt/ssh-src:ro',
+    ]
+  }
+  if (kind === 'oracle') {
+    // Mount layout (paths are relative to the spawner's compose file dir,
+    // same convention as the base volumes):
+    //   <name>/data      → /data       (staging area for migrate mode)
+    //   <name>/memories  → /home/agent/.claude/projects/-workspace/memory
+    // The Claude CLI encodes cwd `/workspace` as `-workspace` under
+    // ~/.claude/projects/, so the memory mount target is that exact path.
+    // Same OAuth token mount as developer — the CLI needs it at runtime.
+    return [
+      '/var/lib/claude-creds/credentials.json:/home/agent/.claude/.credentials.json:ro',
+      `./${name}/data:/data:rw`,
+      `./${name}/memories:/home/agent/.claude/projects/-workspace/memory:rw`,
     ]
   }
   return []
@@ -142,7 +167,7 @@ export const buildServiceBlock = (req: SpawnRequest): ComposeService => {
     `./${req.name}/workspace:/workspace:rw`,
     `./${req.name}/.meta:/meta:ro`,
   ]
-  const kindVolumes = buildKindVolumes(req.kind)
+  const kindVolumes = buildKindVolumes(req.kind, req.name)
   const extraVolumes = (req.mounts ?? []).map((m) => {
     const ro = m.readOnly ? ':ro' : ':rw'
     return `${m.source}:${m.target}${ro}`

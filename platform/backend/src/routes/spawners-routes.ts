@@ -6,6 +6,7 @@ import {
 } from '../schemas/spawner.js'
 import * as queries from '../db/queries/spawners.js'
 import * as developerQueries from '../db/queries/developers.js'
+import * as oracleQueries from '../db/queries/oracles.js'
 import {
   SpawnerClient,
   SpawnerHttpError,
@@ -231,6 +232,35 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
           ...(intent.spec.env ?? {}),
           DEVELOPER_ID: dev.id,
           DEVELOPER_SECRET: dev.secret,
+        },
+      }
+    }
+
+    // For oracle-kind spawns: oracle rows are created out-of-band via
+    // POST /api/oracles (each row has its own state_dir and secret). At
+    // approval time we look the row up by name and inject ORACLE_ID +
+    // ORACLE_SECRET. Legacy rows (pre-secret-column) get a secret minted
+    // via ensureOracleSecret. If no oracle matches the spawn name we
+    // refuse — the user must create the oracle first.
+    if (intent.primitiveKind === 'oracle') {
+      const oracle = await oracleQueries.getOracleByName(intent.primitiveName)
+      if (!oracle) {
+        throw new AppError(
+          400,
+          `no oracle row named '${intent.primitiveName}' — create one via POST /api/oracles before spawning`,
+          'ORACLE_NOT_FOUND',
+        )
+      }
+      const oracleSecret = await oracleQueries.ensureOracleSecret(oracle.id)
+      if (!oracleSecret) {
+        throw new AppError(500, 'failed to mint oracle secret', 'ORACLE_SECRET_FAILED')
+      }
+      spec = {
+        ...intent.spec,
+        env: {
+          ...(intent.spec.env ?? {}),
+          ORACLE_ID: oracle.id,
+          ORACLE_SECRET: oracleSecret,
         },
       }
     }
