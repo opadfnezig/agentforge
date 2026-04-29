@@ -23,8 +23,18 @@ $EDITOR .env
 
 `deploy.sh` validates required env vars, auto-detects the host docker GID
 (needed so the in-container non-root `ntfr` user can talk to
-`/var/run/docker.sock`), builds the image, brings up the spawner, and
-polls `/health` until it answers.
+`/var/run/docker.sock`), builds `agentforge/claude-agent:latest` from
+`${NTFR_HOST_SRC:-/ntfr/agentforge}/docker/agent`, builds the spawner
+image, brings up the spawner, and polls `/health` until it answers.
+
+Because the spawner builds the agent base image itself, a host running
+only the spawner (no agentforge backend/frontend stack) can still spawn
+developer / oracle / researcher primitives — their Dockerfiles `FROM
+agentforge/claude-agent:latest` resolve against the locally-built image.
+The agentforge source tree must be checked out on the host at
+`NTFR_HOST_SRC` (default `/ntfr/agentforge`); if `docker/agent/Dockerfile`
+isn't found there, `deploy.sh` aborts with a clear error rather than
+silently skipping.
 
 ## 3. Validation steps
 
@@ -72,6 +82,7 @@ ls -la "$NTFR_HOST_WORKDIR/.archive/"
 | `NTFR_ORPHAN_RETRY_MAX`            | no       | `3`                  | retries during orphan recovery |
 | `NTFR_ORPHAN_RETRY_BACKOFF_MS`     | no       | `10000`              | sleep between orphan retries |
 | `NTFR_DOCKER_GID` (compose only)   | no       | auto-detected        | host docker group GID; required for non-root socket access |
+| `NTFR_HOST_SRC`                    | no       | `/ntfr/agentforge`   | host path to the agentforge source checkout. Used by `deploy.sh` to build `agentforge/claude-agent:latest` and bind-mounted RO into the spawner for kind-based local builds. |
 
 ## 5. Verifying lifecycle event delivery
 

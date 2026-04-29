@@ -62,6 +62,24 @@ if [[ -z "${NTFR_DOCKER_GID:-}" ]] || [[ "${NTFR_DOCKER_GID}" == "998" ]]; then
   fi
 fi
 
+# Build the agentforge claude-agent base image. Primitive Dockerfiles
+# (developer, oracle, researcher, …) all `FROM agentforge/claude-agent:latest`,
+# so a host running the spawner needs this image present locally — even if
+# the full agentforge stack isn't deployed here. Mirrors the `agent-builder`
+# one-shot in the main agentforge docker-compose.yml.
+NTFR_HOST_SRC="${NTFR_HOST_SRC:-/ntfr/agentforge}"
+AGENT_BUILD_CTX="${NTFR_HOST_SRC}/docker/agent"
+
+if [[ ! -f "${AGENT_BUILD_CTX}/Dockerfile" ]]; then
+  echo "ERROR: agentforge source tree not present at expected path; spawner cannot bootstrap base image." >&2
+  echo "       Looked for: ${AGENT_BUILD_CTX}/Dockerfile" >&2
+  echo "       Set NTFR_HOST_SRC in .env to the host path of the agentforge checkout." >&2
+  exit 1
+fi
+
+echo "Building agentforge/claude-agent:latest from ${AGENT_BUILD_CTX}..."
+docker build -t agentforge/claude-agent:latest "${AGENT_BUILD_CTX}"
+
 echo "Building spawner image..."
 docker compose build
 
