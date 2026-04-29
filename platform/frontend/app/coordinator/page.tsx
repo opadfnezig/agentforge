@@ -170,6 +170,45 @@ export default function CoordinatorPage() {
 
   useEffect(() => { loadChats() }, [loadChats])
 
+  // URL <-> activeChatId sync. The URL is the source of truth on mount and
+  // on browser back/forward; setting activeChatId via UI mirrors back into
+  // ?chat=. Uses window.history.replaceState to avoid a Next.js routing
+  // round-trip on every sidebar click.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const params = new URLSearchParams(window.location.search)
+    const id = params.get('chat')
+    if (id) loadChat(id)
+  }, [loadChat])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const url = new URL(window.location.href)
+    const current = url.searchParams.get('chat')
+    if (activeChatId && current !== activeChatId) {
+      url.searchParams.set('chat', activeChatId)
+      window.history.replaceState(null, '', url.toString())
+    } else if (!activeChatId && current) {
+      url.searchParams.delete('chat')
+      window.history.replaceState(null, '', url.toString())
+    }
+  }, [activeChatId])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const onPopState = () => {
+      const id = new URLSearchParams(window.location.search).get('chat')
+      if (id && id !== activeChatId) {
+        loadChat(id)
+      } else if (!id && activeChatId) {
+        setActiveChatId(null)
+        setMessages([])
+      }
+    }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [activeChatId, loadChat])
+
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
