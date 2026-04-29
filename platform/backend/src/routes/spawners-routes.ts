@@ -275,27 +275,40 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
       }
     }
 
-    const client = new SpawnerClient({ baseUrl: host.baseUrl, timeoutMs: 30_000 })
+    // First-time spawn includes compose-up + image build (e.g. ntfr-oracle
+    // takes ~2min on hearth). 30s used to be the timeout — that aborted on
+    // the backend mid-build, which then ran createdOracleId cleanup, which
+    // left the container with a deleted ORACLE_ID once it eventually came
+    // up (4004 "Oracle not found" forever in the worker logs). 5min covers
+    // the build path comfortably.
+    const client = new SpawnerClient({ baseUrl: host.baseUrl, timeoutMs: 300_000 })
     let primitive
     try {
       primitive = await client.spawn(spec)
     } catch (err) {
-      const message =
-        err instanceof SpawnerHttpError
-          ? `spawner ${err.status}: ${err.bodyText.slice(0, 300)}`
-          : err instanceof SpawnerTransportError
-          ? `spawner transport: ${err.cause instanceof Error ? err.cause.message : String(err.cause)}`
-          : err instanceof Error
-          ? err.message
-          : String(err)
+      const isHttpError = err instanceof SpawnerHttpError
+      const isTransportError = err instanceof SpawnerTransportError
+      const message = isHttpError
+        ? `spawner ${err.status}: ${err.bodyText.slice(0, 300)}`
+        : isTransportError
+        ? `spawner transport: ${err.cause instanceof Error ? err.cause.message : String(err.cause)}`
+        : err instanceof Error
+        ? err.message
+        : String(err)
       await queries.updateSpawnIntent(intent.id, {
         status: 'failed',
         errorMessage: message,
       })
-      // Mark the developer row destroyed (we never delete developer rows;
-      // we want a record of failed spawn attempts in history too). Status
-      // 'destroyed' frees the name for re-use by a future spawn.
-      if (createdDeveloperId) {
+      // Cleanup of auto-created rows is gated on confirmed-failure (the
+      // spawner responded with an HTTP error). Transport-level errors
+      // (timeout / abort / connection-reset) might mean the spawn is
+      // still in progress on the host — deleting the oracle/developer row
+      // here would orphan the container with a now-invalid ID and the
+      // worker would 4004-loop forever on connect. Better to leave the
+      // row and let the user clean it up manually if the spawn never
+      // actually lands.
+      const safeToCleanup = isHttpError
+      if (createdDeveloperId && safeToCleanup) {
         try {
           await developerQueries.updateDeveloper(createdDeveloperId, { status: 'destroyed' })
         } catch (cleanupErr) {
@@ -305,11 +318,7 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
           )
         }
       }
-      // If we auto-created the oracle row for this spawn, delete it on
-      // failure so the name is free for a retry. Pre-existing rows (caller
-      // POSTed /api/oracles first) are left alone — they carry config the
-      // user wants kept across attempts.
-      if (createdOracleId) {
+      if (createdOracleId && safeToCleanup) {
         try {
           await oracleQueries.deleteOracle(createdOracleId)
         } catch (cleanupErr) {
@@ -318,6 +327,12 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
             'Failed to delete auto-created oracle row after spawner error'
           )
         }
+      }
+      if (!safeToCleanup && (createdDeveloperId || createdOracleId)) {
+        logger.warn(
+          { intentId: intent.id, createdDeveloperId, createdOracleId, err: message },
+          'Transport error during spawn — leaving auto-created rows in place (spawn may still complete)'
+        )
       }
       logger.warn(
         { intentId: intent.id, hostId: host.hostId, primitive: intent.primitiveName, err: message },
