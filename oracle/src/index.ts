@@ -61,15 +61,35 @@ function logErr(msg: string, extra?: unknown) {
 
 type Mode = 'read' | 'write' | 'migrate';
 
-const SYSTEM_PROMPT =
-  'You are a knowledge oracle backed by Claude memory. Your memories live under your resolved memory directory. Read them with the Read tool. Do not write to /data except to delete files during migrate mode. Follow the user instructions exactly.';
+const SYSTEM_PROMPT = `You are a knowledge oracle. Your memories are markdown files in your memory directory (resolved automatically by Claude CLI based on your cwd).
 
-function buildReadPrompt(message: string): string {
-  return `You are a knowledge oracle. Answer ONLY from your memories.
+## Memory structure
+
+Your memories MUST follow this layout:
+
+- **index.md** — the root file. Contains a brief summary of your domain, then a list of topics with references to detail files. This is what gets read first on every query. Keep it scannable — headings + 1-2 sentence summaries + links to detail files. Think of it as a table of contents for your knowledge.
+
+- **<topic>.md** — one file per major topic or subdomain. Named descriptively in kebab-case (e.g., \`architecture.md\`, \`deployment.md\`, \`design-decisions.md\`). Each file is self-contained: someone reading just that file should understand the topic without needing index.md.
+
+- **<topic>/** — subdirectories for topics that need multiple files. Use when a topic has enough depth to warrant its own breakdown (e.g., \`infrastructure/networking.md\`, \`infrastructure/storage.md\`). Each subdirectory should have its own \`index.md\` that the root index.md links to.
 
 Rules:
-- Read your memory files first.
-- Cite the relevant section/heading when possible.
+- Every detail file and subdirectory MUST be referenced from index.md (or its parent subdirectory's index.md).
+- Prefer many small files over one giant file. Split when a file exceeds ~150 lines. Use subdirectories when a topic produces 3+ files.
+- Use markdown headings (##, ###) for structure within files.
+- Be dense. No filler, no preamble, no "this document describes..."
+- Write for a human reader who might open these files in an editor.
+- Preserve exact quotes, numbers, dates, and names — do not paraphrase away specifics.
+- When information conflicts with existing content, keep both with context on which is newer.
+
+Do not write to /data except to delete files during migrate mode.`;
+
+function buildReadPrompt(message: string): string {
+  return `Answer ONLY from your memories.
+
+Rules:
+- Read index.md first, then read relevant detail files based on the question.
+- Cite the file and section/heading when possible.
 - If your memories do not contain the answer, say "Not in my memories."
 - Do not speculate or use general knowledge.
 - Be dense. No filler.
@@ -78,31 +98,46 @@ Question: ${message}`;
 }
 
 function buildWritePrompt(newData: string): string {
-  return `You are a knowledge oracle maintaining your memory files. Read your current memories first, then merge the new information in.
+  return `Merge new information into your memories.
 
-Rules:
-- Read your current memory files first.
-- Merge the new information into the appropriate place — DO NOT just append.
-- Update existing sections if the new info refines/contradicts them.
-- Add new sections (or new memory files) if the info covers a new topic.
-- Maintain existing structure and style.
+Procedure:
+1. Read index.md to understand current structure. If it doesn't exist, create it.
+2. Read any detail files relevant to the new information.
+3. Break the new information into topics, then for each topic:
+   - If it fits an existing detail file, edit that file — update the right section, don't append.
+   - If it's a new topic, create a new detail file (or subdirectory if it warrants 3+ files).
+   - If it refines/contradicts existing content, update in place with context on which is newer.
+4. Update index.md — every detail file and subdirectory must be referenced there.
+
+Key rules:
+- Do NOT dump all new info into one file. Decompose by topic.
+- Do NOT just append to the end of files. Integrate into the right section.
 - Do NOT remove existing information unless the new info explicitly supersedes it.
-- Write the updated memory back using Edit or Write tools.
+- If a file exceeds ~150 lines after your edit, split it.
 
 New information to integrate:
 ${newData}`;
 }
 
 function buildMigratePrompt(): string {
-  return `You are a knowledge oracle migrating staged data into your memories.
+  return `Migrate staged data files into your structured memories.
 
 Procedure:
-1. List files under /data.
-2. For each file, read it and merge its content into the appropriate memory file (creating new memory files where needed). Maintain existing structure and style; do not just append.
-3. After a file's content is fully integrated into your memories, delete the source file from /data.
-4. When /data is empty (or only contains files you cannot integrate), report what was migrated and what (if anything) was skipped and why.
+1. Read index.md (if it exists) to understand current memory structure.
+2. List files under /data.
+3. For each data file:
+   a. Read it fully.
+   b. Break its content into topics.
+   c. For each topic, either update an existing detail file or create a new one. Use subdirectories when a topic produces 3+ files.
+   d. Ensure index.md references every detail file and subdirectory.
+   e. After the file's content is fully integrated, delete it from /data.
+4. Report what was migrated and what (if anything) was skipped and why.
 
-Do not write new files into /data. Only read and delete from /data.`;
+Key rules:
+- Do NOT copy a data file wholesale into a single memory file. Decompose it by topic.
+- A 150-line data file might produce 3-5 detail files.
+- If a data file covers topics already in your memories, merge — don't duplicate.
+- Do not write new files into /data. Only read and delete from /data.`;
 }
 
 function buildPrompt(mode: Mode, payload: string): string {
