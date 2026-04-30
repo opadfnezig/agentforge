@@ -453,6 +453,8 @@ class DeveloperClient {
       }
 
       let finalAssistantText = '';
+      let lastResult: Record<string, unknown> | null = null;
+      let stderrBuf = '';
 
       const rl = readline.createInterface({ input: child.stdout!, crlfDelay: Infinity });
       rl.on('line', (line) => {
@@ -485,6 +487,8 @@ class DeveloperClient {
               finalAssistantText = textParts.join('\n');
             }
           }
+        } else if (eventType === 'result') {
+          lastResult = evt as Record<string, unknown>;
         }
 
         this.send({
@@ -497,6 +501,7 @@ class DeveloperClient {
 
       child.stderr!.on('data', (chunk: Buffer) => {
         const text = chunk.toString();
+        stderrBuf += text;
         logErr(`[claude stderr] ${text}`);
         this.send({
           type: 'event',
@@ -511,7 +516,34 @@ class DeveloperClient {
       });
 
       child.on('close', (code) => {
-        log(`claude exited code=${code} runId=${runId}`);
+        // Dump everything useful to the worker's stdout so the operator can
+        // tell *why* claude exited (max_turns, api_error, etc).
+        const summary: Record<string, unknown> = { runId, exitCode: code };
+        if (lastResult) {
+          for (const k of [
+            'subtype',
+            'stop_reason',
+            'terminal_reason',
+            'is_error',
+            'num_turns',
+            'total_cost_usd',
+            'duration_ms',
+            'duration_api_ms',
+            'api_error_status',
+            'permission_denials',
+          ]) {
+            if (lastResult[k] !== undefined) summary[k] = lastResult[k];
+          }
+        }
+        if (stderrBuf.trim()) summary.stderr = stderrBuf.trim().slice(0, 500);
+        if (finalAssistantText) {
+          summary.finalAssistantPreview = finalAssistantText.slice(0, 200);
+        }
+        if (code === 0 && !lastResult?.is_error) {
+          log(`claude exited`, summary);
+        } else {
+          logErr(`claude exited with error`, summary);
+        }
         resolve({ exitCode: code ?? 1, finalAssistantText });
       });
     });

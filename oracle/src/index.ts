@@ -347,6 +347,7 @@ class OracleClient {
       let finalAssistantText = '';
       let rawStdout = '';
       let stderr = '';
+      let lastResult: Record<string, unknown> | null = null;
 
       const rl = readline.createInterface({ input: child.stdout!, crlfDelay: Infinity });
       rl.on('line', (line) => {
@@ -379,6 +380,7 @@ class OracleClient {
             }
           }
         } else if (eventType === 'result') {
+          lastResult = evt as Record<string, unknown>;
           const result = (evt as { result?: string }).result;
           if (!finalAssistantText && typeof result === 'string') {
             finalAssistantText = result;
@@ -410,7 +412,6 @@ class OracleClient {
       });
 
       child.on('close', (code) => {
-        log(`claude exited code=${code} runId=${runId}`);
         // Surface non-JSON stdout lines as fallback error context (matches
         // oracle-engine's prior pattern: e.g. "Error: Reached max turns").
         let errorText = stderr.trim();
@@ -421,6 +422,37 @@ class OracleClient {
           });
           errorText = errLines.join(' ').slice(0, 500);
         }
+
+        // Dump everything useful to the worker's stdout so the operator can
+        // tell *why* claude exited (max_turns, api_error, etc) without
+        // having to round-trip through the backend's event stream.
+        const summary: Record<string, unknown> = { runId, exitCode: code };
+        if (lastResult) {
+          for (const k of [
+            'subtype',
+            'stop_reason',
+            'terminal_reason',
+            'is_error',
+            'num_turns',
+            'total_cost_usd',
+            'duration_ms',
+            'duration_api_ms',
+            'api_error_status',
+            'permission_denials',
+          ]) {
+            if (lastResult[k] !== undefined) summary[k] = lastResult[k];
+          }
+        }
+        if (errorText) summary.errorText = errorText.slice(0, 500);
+        if (finalAssistantText) {
+          summary.finalAssistantPreview = finalAssistantText.slice(0, 200);
+        }
+        if (code === 0 && !lastResult?.is_error) {
+          log(`claude exited`, summary);
+        } else {
+          logErr(`claude exited with error`, summary);
+        }
+
         resolve({ exitCode: code ?? 1, finalAssistantText: finalAssistantText.trim(), errorText });
       });
     });
