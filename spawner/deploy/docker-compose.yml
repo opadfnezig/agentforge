@@ -40,9 +40,9 @@ services:
       - ${NTFR_HOST_WORKDIR:-/home/ntfr/ntfr}:/ntfr
       # Source tree for kind-based local builds (developer/researcher/…).
       # The spawner shells out to `docker compose build` using hardcoded
-      # contexts under /ntfr/agentforge — those paths must be readable
+      # contexts under /src — those paths must be readable
       # inside the spawner container. Drop this once we move to a registry.
-      - ${NTFR_HOST_SRC:-/ntfr/agentforge}:/ntfr/agentforge:ro
+      - ${NTFR_HOST_SRC:-/ntfr/agentforge}:/src:ro
       # Host docker socket — spawner shells out to `docker compose`.
       - /var/run/docker.sock:/var/run/docker.sock
     # Allow the in-container `ntfr` user to talk to the host docker socket.

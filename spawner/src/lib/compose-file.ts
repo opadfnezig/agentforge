@@ -20,13 +20,13 @@ interface ComposeService {
 }
 
 // Hardcoded per-kind build contexts. The spawner container mounts the
-// host's source tree at /ntfr/agentforge (see spawner/deploy/docker-compose.yml,
+// host's source tree at /src (see spawner/deploy/docker-compose.yml,
 // NTFR_HOST_SRC), so these paths are visible to the compose CLI inside
 // the spawner. This is intentionally simple — once we have a real image
 // registry, switch the spawner to pull-by-tag and remove this map.
 export const KIND_BUILD_CONTEXT: Record<string, string | undefined> = {
-  developer: '/ntfr/agentforge/developer',
-  oracle: '/ntfr/agentforge/oracle',
+  developer: '/src/developer',
+  oracle: '/src/oracle',
 }
 
 // Derive the WS coordinator URL from NTFR_SERVER_URL when no explicit
