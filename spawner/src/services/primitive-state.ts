@@ -9,8 +9,6 @@ const stateFile = (name: string) => paths.primitiveStateFile(name)
 
 export const ensurePrimitiveDirs = async (name: string): Promise<void> => {
   await mkdir(paths.primitiveDir(name), { recursive: true, mode: 0o755 })
-  await mkdir(paths.primitiveWorkspace(name), { recursive: true, mode: 0o755 })
-  await mkdir(paths.primitiveMeta(name), { recursive: true, mode: 0o755 })
 }
 
 export const writeState = async (state: PrimitiveState_t): Promise<void> => {

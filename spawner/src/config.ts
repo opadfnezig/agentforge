@@ -45,8 +45,6 @@ export const paths = {
   spawnerLog: join(config.NTFR_WORKDIR, '.spawner', 'spawner.log'),
   primitiveDir: (name: string) => join(config.NTFR_WORKDIR, name),
   primitiveStateFile: (name: string) => join(config.NTFR_WORKDIR, name, 'state.json'),
-  primitiveWorkspace: (name: string) => join(config.NTFR_WORKDIR, name, 'workspace'),
-  primitiveMeta: (name: string) => join(config.NTFR_WORKDIR, name, '.meta'),
 }
 
 export type Config = typeof config

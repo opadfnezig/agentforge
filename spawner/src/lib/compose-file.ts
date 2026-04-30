@@ -157,16 +157,10 @@ export const writeCompose = async (file: ComposeFile): Promise<void> => {
  * Build the service block for a primitive. Every primitive runs with
  * `restart: always` per locked design decision.
  *
- * Volume layout (mandatory):
- *   - <primitive>/workspace:/workspace:rw  — primitive's R/W folder
- *   - <primitive>/.meta:/meta:ro           — spawner-owned metadata, primitive RO
- * Plus any extra mounts the caller provided (passed through verbatim).
+ * Volumes are the union of per-kind static mounts (memory/credentials for
+ * oracle, credentials/ssh for developer) and any caller-supplied mounts.
  */
 export const buildServiceBlock = (req: SpawnRequest): ComposeService => {
-  const baseVolumes = [
-    `./${req.name}/workspace:/workspace:rw`,
-    `./${req.name}/.meta:/meta:ro`,
-  ]
   const kindVolumes = buildKindVolumes(req.kind, req.name)
   const extraVolumes = (req.mounts ?? []).map((m) => {
     const ro = m.readOnly ? ':ro' : ':rw'
@@ -176,7 +170,7 @@ export const buildServiceBlock = (req: SpawnRequest): ComposeService => {
   const svc: ComposeService = {
     container_name: `ntfr-${req.name}`,
     restart: 'always',
-    volumes: [...baseVolumes, ...kindVolumes, ...extraVolumes],
+    volumes: [...kindVolumes, ...extraVolumes],
     // Join the same external docker network the spawner itself is on, so
     // the primitive can reach `backend` (and other named services) by
     // hostname. Without this, primitives land on the auto-created
