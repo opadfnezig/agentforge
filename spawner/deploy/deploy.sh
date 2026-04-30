@@ -92,6 +92,21 @@ for i in $(seq 1 20); do
     echo "Spawner healthy."
     curl -s "http://127.0.0.1:${NTFR_PORT:-9898}/info" | head -c 1024
     echo
+
+    # Rebuild + restart any primitives the spawner already manages so they
+    # pick up source changes in developer/oracle/researcher and the new
+    # base image. `docker compose build` only rebuilds layers whose context
+    # actually changed, so this is cheap when nothing has been touched.
+    PRIMITIVE_COMPOSE="${NTFR_HOST_WORKDIR}/compose.yml"
+    if [[ -f "${PRIMITIVE_COMPOSE}" ]]; then
+      echo "Rebuilding primitive images from ${PRIMITIVE_COMPOSE}..."
+      docker compose -f "${PRIMITIVE_COMPOSE}" build
+      echo "Restarting primitives (recreated only if image hash changed)..."
+      docker compose -f "${PRIMITIVE_COMPOSE}" up -d
+    else
+      echo "No managed compose at ${PRIMITIVE_COMPOSE} yet — skipping primitive rebuild."
+    fi
+
     exit 0
   fi
   sleep 1
