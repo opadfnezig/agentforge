@@ -61,7 +61,11 @@ function logErr(msg: string, extra?: unknown) {
 
 type Mode = 'read' | 'write' | 'migrate';
 
-const SYSTEM_PROMPT = `You are a knowledge oracle. Your memories are markdown files in your memory directory (resolved automatically by Claude CLI based on your cwd).
+const SYSTEM_PROMPT = `You are a knowledge oracle. Your memories live as markdown files at this absolute path:
+
+  /home/agent/.claude/projects/-workspace/memory/
+
+Always read/write memory files there with the Read/Write/Edit tools. Use absolute paths — do NOT confuse this with /data (which is a migration staging directory, only relevant in migrate mode).
 
 ## Memory structure
 
@@ -85,10 +89,10 @@ Rules:
 Do not write to /data except to delete files during migrate mode.`;
 
 function buildReadPrompt(message: string): string {
-  return `Answer ONLY from your memories.
+  return `Answer ONLY from your memories at /home/agent/.claude/projects/-workspace/memory/.
 
 Rules:
-- Read index.md first, then read relevant detail files based on the question.
+- Read /home/agent/.claude/projects/-workspace/memory/index.md first, then read relevant detail files based on the question.
 - Cite the file and section/heading when possible.
 - If your memories do not contain the answer, say "Not in my memories."
 - Do not speculate or use general knowledge.
