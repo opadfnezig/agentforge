@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useParams } from 'next/navigation'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -45,6 +45,11 @@ export default function OracleDetailPage() {
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const logScrollRef = useRef<HTMLDivElement>(null)
+
+  // Wall-clock tick so in-progress durations advance independently of the
+  // event poll. liveDuration() reads `now` to compute elapsed against
+  // startedAt for queries that are still running.
+  const now = useNow(1000)
 
   const refreshQueries = useCallback(() => {
     oraclesApi.listQueries(id).then(setQueries).catch(() => {})
@@ -285,7 +290,14 @@ export default function OracleDetailPage() {
                         <span className="text-xs uppercase tracking-wider text-zinc-500">{q.mode}</span>
                         <span className="text-xs text-zinc-600 ml-auto">{relTime(q.createdAt)}</span>
                       </div>
-                      <p className="text-xs text-zinc-300 line-clamp-2">{q.message || '(empty)'}</p>
+                      <p className="text-xs text-zinc-300 line-clamp-2 mb-1">{q.message || '(empty)'}</p>
+                      <div className="flex items-center gap-3 text-[10px] text-zinc-500 font-mono">
+                        <span>{liveDuration(q, now) ?? '—'}</span>
+                        <span>{q.totalCostUsd != null ? `$${q.totalCostUsd.toFixed(4)}` : '—'}</span>
+                        {tokensSummary(q) && (
+                          <span className="text-zinc-600">{tokensSummary(q)}</span>
+                        )}
+                      </div>
                     </button>
                   </li>
                 ))}
@@ -307,6 +319,7 @@ export default function OracleDetailPage() {
               onApprove={() => handleApprove(activeQuery.id)}
               onRetry={(withContext) => handleRetry(activeQuery.id, withContext)}
               logScrollRef={logScrollRef}
+              now={now}
             />
           ) : (
             <div className="flex-1 flex items-center justify-center text-zinc-600 text-sm">
@@ -364,7 +377,7 @@ export default function OracleDetailPage() {
 // ---------------------------------------------------------------------------
 
 function ActiveQueryView({
-  query, logs, expandedLogIds, onToggleExpand, onCancel, onApprove, onRetry, logScrollRef,
+  query, logs, expandedLogIds, onToggleExpand, onCancel, onApprove, onRetry, logScrollRef, now,
 }: {
   oracleId: string
   query: OracleQuery
@@ -375,7 +388,20 @@ function ActiveQueryView({
   onApprove: () => void
   onRetry: (withContext: boolean) => void
   logScrollRef: React.RefObject<HTMLDivElement | null>
+  now: number
 }) {
+  // Collapse old events on terminal runs so the section doesn't dominate
+  // the page; show last 10 by default with a toggle to reveal everything.
+  const isTerminal = query.status === 'success' || query.status === 'failure' || query.status === 'cancelled'
+  const [showAllLogs, setShowAllLogs] = useState(false)
+  const visibleLogs = !isTerminal || showAllLogs ? logs : logs.slice(-10)
+  const hiddenCount = logs.length - visibleLogs.length
+  const usage = (query.trailer?.usage ?? {}) as Record<string, number | undefined>
+  const tokensIn = usage.input_tokens
+  const tokensOut = usage.output_tokens
+  const cacheRead = usage.cache_read_input_tokens
+  const cacheWrite = usage.cache_creation_input_tokens
+
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* Query header */}
@@ -407,12 +433,16 @@ function ActiveQueryView({
         {/* Metadata grid */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-1 text-xs">
           <Meta label="model" value={query.model} />
-          <Meta label="provider" value={query.provider} />
           <Meta label="cost" value={query.totalCostUsd != null ? `$${query.totalCostUsd.toFixed(4)}` : null} />
-          <Meta label="duration" value={formatDuration(query.durationMs)} />
+          <Meta label="duration" value={liveDuration(query, now)} />
           <Meta label="api time" value={formatDuration(query.durationApiMs)} />
+          <Meta label="tokens in" value={tokensIn != null ? tokensIn.toLocaleString() : null} />
+          <Meta label="tokens out" value={tokensOut != null ? tokensOut.toLocaleString() : null} />
+          <Meta label="cache read" value={cacheRead ? cacheRead.toLocaleString() : null} />
+          <Meta label="cache write" value={cacheWrite ? cacheWrite.toLocaleString() : null} />
           <Meta label="stop" value={query.stopReason} />
           <Meta label="session" value={query.sessionId ? query.sessionId.slice(0, 8) : null} />
+          <Meta label="provider" value={query.provider} />
           <Meta label="started" value={query.startedAt ? relTime(query.startedAt) : null} />
         </div>
       </div>
@@ -447,16 +477,34 @@ function ActiveQueryView({
           {logs.length === 0 ? (
             <p className="text-xs text-zinc-600">No events yet.</p>
           ) : (
-            <ul className="space-y-1">
-              {logs.map(log => (
-                <LogItem
-                  key={log.id}
-                  log={log}
-                  expanded={expandedLogIds.has(log.id)}
-                  onToggle={() => onToggleExpand(log.id)}
-                />
-              ))}
-            </ul>
+            <>
+              {hiddenCount > 0 && (
+                <button
+                  onClick={() => setShowAllLogs(true)}
+                  className="text-xs text-zinc-500 hover:text-zinc-300 mb-2"
+                >
+                  ▸ show {hiddenCount} earlier event{hiddenCount === 1 ? '' : 's'}
+                </button>
+              )}
+              {showAllLogs && isTerminal && logs.length > 10 && (
+                <button
+                  onClick={() => setShowAllLogs(false)}
+                  className="text-xs text-zinc-500 hover:text-zinc-300 mb-2"
+                >
+                  ▾ collapse to last 10
+                </button>
+              )}
+              <ul className="space-y-1">
+                {visibleLogs.map(log => (
+                  <LogItem
+                    key={log.id}
+                    log={log}
+                    expanded={expandedLogIds.has(log.id)}
+                    onToggle={() => onToggleExpand(log.id)}
+                  />
+                ))}
+              </ul>
+            </>
           )}
         </Section>
 
@@ -584,4 +632,34 @@ function formatDuration(ms: number | null | undefined): string | null {
   if (ms < 1000) return `${ms}ms`
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
   return `${Math.floor(ms / 60_000)}m ${Math.floor((ms % 60_000) / 1000)}s`
+}
+
+function useNow(intervalMs: number = 1000): number {
+  const [now, setNow] = useState<number>(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), intervalMs)
+    return () => clearInterval(id)
+  }, [intervalMs])
+  return now
+}
+
+// Resolve a query's duration to display: completed runs use durationMs;
+// running runs compute against the wall-clock tick so the value advances
+// every second without waiting for the next poll.
+function liveDuration(query: OracleQuery, now: number): string | null {
+  if (query.durationMs != null) return formatDuration(query.durationMs)
+  if (query.status === 'running' && query.startedAt) {
+    return formatDuration(now - new Date(query.startedAt).getTime())
+  }
+  return null
+}
+
+function tokensSummary(query: OracleQuery): string | null {
+  const usage = (query.trailer?.usage ?? {}) as Record<string, number | undefined>
+  const inT = usage.input_tokens
+  const outT = usage.output_tokens
+  if (inT == null && outT == null) return null
+  const inS = inT != null ? `${(inT / 1000).toFixed(1)}k` : '?'
+  const outS = outT != null ? `${(outT / 1000).toFixed(1)}k` : '?'
+  return `↑${inS} ↓${outS}`
 }
