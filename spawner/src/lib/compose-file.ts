@@ -108,17 +108,11 @@ const buildKindVolumes = (kind: string, name: string): string[] => {
     ]
   }
   if (kind === 'oracle') {
-    // Mount layout (paths are relative to the spawner's compose file dir,
-    // same convention as the base volumes):
-    //   <name>/data      → /data       (staging area for migrate mode)
-    //   <name>/memories  → /home/agent/.claude/projects/-workspace/memory
-    // The Claude CLI encodes cwd `/workspace` as `-workspace` under
-    // ~/.claude/projects/, so the memory mount target is that exact path.
-    // Same OAuth token mount as developer — the CLI needs it at runtime.
+    // Oracle memory + data mounts are injected by the backend
+    // (spawners-routes.ts) via spec.mounts — the spawner only adds the
+    // credential mount here.
     return [
       '/var/lib/claude-creds/credentials.json:/home/agent/.claude/.credentials.json:ro',
-      `./${name}/data:/data:rw`,
-      `./${name}/memories:/home/agent/.claude/projects/-workspace/memory:rw`,
     ]
   }
   return []
