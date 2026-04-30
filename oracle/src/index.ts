@@ -23,7 +23,7 @@ function loadConfig(): Config {
   // Pinned to /workspace so the claude CLI's memory dir resolves to a
   // stable path (~/.claude/projects/-workspace/memory) the host can mount.
   const workspacePath = process.env.WORKSPACE_PATH || '/workspace';
-  const maxTurns = parseInt(process.env.MAX_TURNS || '30', 10);
+  const maxTurns = parseInt(process.env.MAX_TURNS || '300', 10);
   const model = process.env.ORACLE_MODEL || undefined;
 
   if (!coordinatorUrl) throw new Error('COORDINATOR_URL is required');

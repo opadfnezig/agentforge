@@ -24,7 +24,7 @@ function loadConfig(): Config {
   const researcherSecret = process.env.RESEARCHER_SECRET;
   const workspacePath = process.env.WORKSPACE_PATH || '/workspace';
   const resultsDir = process.env.RESULTS_DIR || `${workspacePath}/results`;
-  const maxTurns = parseInt(process.env.MAX_TURNS || '100', 10);
+  const maxTurns = parseInt(process.env.MAX_TURNS || '1000', 10);
   const model = process.env.RESEARCHER_MODEL || undefined;
 
   if (!coordinatorUrl) throw new Error('COORDINATOR_URL is required');
