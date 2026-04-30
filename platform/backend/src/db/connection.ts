@@ -140,12 +140,33 @@ export interface DbOracle {
 export interface DbOracleQuery {
   id: string
   oracle_id: string
+  mode: string
   message: string
   response: string | null
   duration_ms: number | null
   status: string
+  started_at: Date | null
+  finished_at: Date | null
+  error_message: string | null
+  provider: string | null
+  model: string | null
+  session_id: string | null
+  total_cost_usd: number | null
+  duration_api_ms: number | null
+  stop_reason: string | null
+  trailer: Record<string, unknown> | string | null
+  resume_context: string | null
+  parent_query_id: string | null
   created_at: Date
   updated_at: Date
+}
+
+export interface DbOracleLog {
+  id: string
+  query_id: string
+  timestamp: Date
+  event_type: string
+  data: Record<string, unknown> | string
 }
 
 export interface DbCoordinatorChat {

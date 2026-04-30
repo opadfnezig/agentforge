@@ -35,19 +35,63 @@ export const updateOracleSchema = z.object({
   config: z.record(z.unknown()).optional(),
 })
 
+export const oracleModeSchema = z.enum(['read', 'write', 'migrate'])
+export const oracleQueryStatusSchema = z.enum([
+  'pending',
+  'queued',
+  'running',
+  'success',
+  'failure',
+  'cancelled',
+])
+
 export const oracleQuerySchema = z.object({
   id: z.string().uuid(),
   oracleId: z.string().uuid(),
+  mode: oracleModeSchema,
   message: z.string(),
   response: z.string().nullable(),
+  status: oracleQueryStatusSchema,
+  startedAt: z.date().nullable(),
+  finishedAt: z.date().nullable(),
+  errorMessage: z.string().nullable(),
+  provider: z.string().nullable(),
+  model: z.string().nullable(),
+  sessionId: z.string().nullable(),
+  totalCostUsd: z.number().nullable(),
   durationMs: z.number().nullable(),
-  status: z.string(),
+  durationApiMs: z.number().nullable(),
+  stopReason: z.string().nullable(),
+  trailer: z.record(z.unknown()).nullable(),
+  resumeContext: z.string().nullable(),
+  parentQueryId: z.string().uuid().nullable(),
   createdAt: z.date(),
   updatedAt: z.date(),
+})
+
+export const oracleLogSchema = z.object({
+  id: z.string().uuid(),
+  queryId: z.string().uuid(),
+  timestamp: z.date(),
+  eventType: z.string(),
+  data: z.record(z.unknown()),
+})
+
+export const oracleDispatchSchema = z.object({
+  message: z.string().min(1),
+  mode: oracleModeSchema.optional(),
+  autoApprove: z.boolean().optional(),
+})
+
+export const editOracleQueryMessageSchema = z.object({
+  message: z.string().min(1),
 })
 
 export type Oracle = z.infer<typeof oracleSchema>
 export type CreateOracle = z.infer<typeof createOracleSchema>
 export type UpdateOracle = z.infer<typeof updateOracleSchema>
 export type OracleQuery = z.infer<typeof oracleQuerySchema>
+export type OracleQueryStatus = z.infer<typeof oracleQueryStatusSchema>
+export type OracleMode = z.infer<typeof oracleModeSchema>
+export type OracleLog = z.infer<typeof oracleLogSchema>
 export type OracleStatus = z.infer<typeof oracleStatusSchema>

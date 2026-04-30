@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events'
 import { logger } from '../utils/logger.js'
 import * as oracleQueries from '../db/queries/oracles.js'
-import { v4 as uuid } from 'uuid'
+import { OracleQueryStatus, OracleMode } from '../schemas/oracle.js'
 
 /**
  * Minimal WebSocket shape we rely on. Matches both `ws.WebSocket` and the
@@ -14,14 +14,10 @@ export interface OracleWebSocket {
   on(event: string, listener: (...args: any[]) => void): void
 }
 
-export type OracleMode = 'read' | 'write' | 'migrate'
-
-type OracleRunStatus = 'running' | 'success' | 'failure'
-
 interface IncomingRunUpdate {
   type: 'run_update'
   runId: string
-  status: OracleRunStatus
+  status: 'running' | 'success' | 'failure'
   response?: string | null
   error?: string | null
 }
@@ -46,22 +42,10 @@ interface DispatchMessage {
   payload: string
 }
 
-interface PendingRun {
-  resolve: (value: { response: string; durationMs: number }) => void
-  reject: (err: Error) => void
-  startedAt: number
-  oracleId: string
-  mode: OracleMode
-  message: string
-}
-
 class OracleRegistry {
   private sockets = new Map<string, OracleWebSocket>()
-  private pending = new Map<string, PendingRun>()
-  // Default per-run timeout (ms). The current in-process oracle runs
-  // hold the request open while claude works; we mirror that by giving
-  // each WS dispatch a generous deadline.
-  private readonly runTimeoutMs = 5 * 60_000
+  // Track oracle's current busy-state and the queryId in flight per oracle.
+  private busy = new Map<string, string>()
   readonly events = new EventEmitter()
 
   constructor() {
@@ -75,20 +59,30 @@ class OracleRegistry {
     }
     this.sockets.set(oracleId, ws)
     logger.info({ oracleId }, 'Oracle registered')
+    // Drain any queued runs that arrived while offline.
+    this.assignNextQueued(oracleId).catch((err) => {
+      logger.error({ err, oracleId }, 'Queue drain on register failed')
+    })
   }
 
   async unregister(oracleId: string, ws: OracleWebSocket): Promise<void> {
-    // Only remove if this socket is the currently-tracked one — a stale
-    // close from a superseded socket must not evict the live one.
     if (this.sockets.get(oracleId) === ws) {
       this.sockets.delete(oracleId)
       logger.info({ oracleId }, 'Oracle unregistered')
     }
-    // Reject any in-flight runs on this socket so callers don't hang.
-    for (const [runId, p] of this.pending.entries()) {
-      if (p.oracleId === oracleId) {
-        this.pending.delete(runId)
-        p.reject(new Error('Oracle disconnected before run completed'))
+    // Mark any in-flight query as failed so callers/UI know the run died
+    // with the connection.
+    const inFlightQueryId = this.busy.get(oracleId)
+    if (inFlightQueryId) {
+      this.busy.delete(oracleId)
+      const updated = await oracleQueries.updateOracleQuery(inFlightQueryId, {
+        status: 'failure',
+        errorMessage: 'Oracle disconnected before run completed',
+        finishedAt: new Date(),
+      })
+      if (updated) {
+        this.events.emit(`update:${inFlightQueryId}`, updated)
+        this.events.emit(`complete:${inFlightQueryId}`, updated)
       }
     }
   }
@@ -98,47 +92,117 @@ class OracleRegistry {
     return !!ws && ws.readyState === 1
   }
 
+  isBusy(oracleId: string): boolean {
+    return this.busy.has(oracleId)
+  }
+
   /**
-   * Dispatch a mode/payload to the oracle's WS and wait for the run_update
-   * with terminal status. Returns the assistant response text.
+   * Pick the oldest queued query for this oracle and dispatch it if the
+   * oracle is online and idle.
+   */
+  async assignNextQueued(oracleId: string): Promise<void> {
+    if (!this.isOnline(oracleId) || this.isBusy(oracleId)) return
+    const next = await oracleQueries.getNextQueuedOracleQuery(oracleId)
+    if (!next) return
+
+    logger.info({ oracleId, queryId: next.id, mode: next.mode }, 'Assigning queued oracle query')
+    this.dispatch(oracleId, next.id, next.mode, next.message).catch(async (err) => {
+      logger.error({ err, queryId: next.id }, 'Queued oracle dispatch failed')
+      const updated = await oracleQueries.updateOracleQuery(next.id, {
+        status: 'failure',
+        errorMessage: err instanceof Error ? err.message : String(err),
+        finishedAt: new Date(),
+      })
+      if (updated) {
+        this.events.emit(`update:${updated.id}`, updated)
+        this.events.emit(`complete:${updated.id}`, updated)
+      }
+      this.busy.delete(oracleId)
+      // Try the next one in case this was a transient failure on a single
+      // run rather than the oracle going down.
+      this.assignNextQueued(oracleId).catch(() => { /* ignore */ })
+    })
+  }
+
+  /**
+   * Send the dispatch message to the oracle worker. Marks the oracle busy
+   * and the query running. Resolves when terminal status is recorded
+   * (success/failure/cancelled). Mirrors the developer registry contract.
    */
   async dispatch(
     oracleId: string,
+    queryId: string,
     mode: OracleMode,
-    message: string,
-  ): Promise<{ response: string; durationMs: number }> {
+    message: string
+  ): Promise<void> {
     const ws = this.sockets.get(oracleId)
     if (!ws || ws.readyState !== 1) {
       throw new Error(`Oracle ${oracleId} is not online`)
     }
+    if (this.busy.has(oracleId)) {
+      throw new Error(`Oracle ${oracleId} is busy with another query`)
+    }
 
-    const runId = uuid()
-    const dispatchMsg: DispatchMessage = { type: 'dispatch', runId, mode, payload: message }
+    this.busy.set(oracleId, queryId)
+    const dispatchMsg: DispatchMessage = { type: 'dispatch', runId: queryId, mode, payload: message }
+    ws.send(JSON.stringify(dispatchMsg))
+    logger.info({ oracleId, queryId, mode }, 'Oracle dispatch sent')
 
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(runId)
-        reject(new Error(`Oracle ${oracleId} run timed out after ${this.runTimeoutMs}ms`))
-      }, this.runTimeoutMs)
-
-      this.pending.set(runId, {
-        oracleId,
-        mode,
-        message,
-        startedAt: Date.now(),
-        resolve: (v) => { clearTimeout(timer); resolve(v) },
-        reject: (e) => { clearTimeout(timer); reject(e) },
-      })
-
-      try {
-        ws.send(JSON.stringify(dispatchMsg))
-        logger.info({ oracleId, runId, mode }, 'Oracle dispatch sent')
-      } catch (err) {
-        this.pending.delete(runId)
-        clearTimeout(timer)
-        reject(err instanceof Error ? err : new Error(String(err)))
-      }
+    const updated = await oracleQueries.updateOracleQuery(queryId, {
+      status: 'running',
+      startedAt: new Date(),
     })
+    if (updated) this.events.emit(`update:${queryId}`, updated)
+
+    return new Promise((resolve) => {
+      const handler = () => {
+        this.events.off(`complete:${queryId}`, handler)
+        resolve()
+      }
+      this.events.on(`complete:${queryId}`, handler)
+    })
+  }
+
+  async captureMetadataFromEvent(
+    queryId: string,
+    eventType: string,
+    data: Record<string, unknown>
+  ): Promise<import('../schemas/oracle.js').OracleQuery | null> {
+    if (eventType === 'system' && pickString(data, 'subtype') === 'init') {
+      const model = pickString(data, 'model')
+      const sessionId = pickString(data, 'session_id')
+      const provider = providerFromModel(model)
+      if (model || sessionId) {
+        return oracleQueries.updateOracleQuery(queryId, {
+          model: model ?? undefined,
+          sessionId: sessionId ?? undefined,
+          provider: provider ?? undefined,
+        })
+      }
+    }
+    if (eventType === 'result') {
+      const trailer: Record<string, unknown> = {
+        session_id: pickString(data, 'session_id'),
+        duration_ms: pickNumber(data, 'duration_ms'),
+        duration_api_ms: pickNumber(data, 'duration_api_ms'),
+        stop_reason: pickString(data, 'stop_reason'),
+        total_cost_usd: pickNumber(data, 'total_cost_usd'),
+        num_turns: pickNumber(data, 'num_turns'),
+        is_error: data['is_error'],
+        usage: data['usage'],
+      }
+      for (const k of Object.keys(trailer)) {
+        if (trailer[k] === undefined) delete trailer[k]
+      }
+      return oracleQueries.updateOracleQuery(queryId, {
+        trailer,
+        sessionId: (trailer.session_id as string | undefined) ?? undefined,
+        durationApiMs: (trailer.duration_api_ms as number | undefined) ?? undefined,
+        stopReason: (trailer.stop_reason as string | undefined) ?? undefined,
+        totalCostUsd: (trailer.total_cost_usd as number | undefined) ?? undefined,
+      })
+    }
+    return null
   }
 
   async handleMessage(oracleId: string, raw: string | Buffer): Promise<void> {
@@ -150,58 +214,78 @@ class OracleRegistry {
       return
     }
 
-    switch (msg.type) {
-      case 'heartbeat':
-        return
-      case 'event': {
-        // Events are forwarded via the emitter for any subscribers (UI etc.).
-        this.events.emit(`event:${msg.runId}`, msg)
-        return
-      }
-      case 'run_update': {
-        const pending = this.pending.get(msg.runId)
-        if (!pending) {
-          logger.warn({ oracleId, runId: msg.runId, status: msg.status }, 'Oracle run_update for unknown run')
+    try {
+      switch (msg.type) {
+        case 'heartbeat':
+          return
+
+        case 'event': {
+          const log = await oracleQueries.createOracleLog(
+            msg.runId,
+            msg.event_type,
+            msg.data || {}
+          )
+          this.events.emit(`log:${msg.runId}`, log)
+          const updated = await this.captureMetadataFromEvent(
+            msg.runId,
+            msg.event_type,
+            msg.data || {}
+          )
+          if (updated) this.events.emit(`update:${msg.runId}`, updated)
           return
         }
-        if (msg.status === 'running') return
-        this.pending.delete(msg.runId)
-        const durationMs = Date.now() - pending.startedAt
-        if (msg.status === 'success') {
-          const response = (msg.response ?? '').trim()
-          // Only `read` runs persist queries — write/migrate are stateful
-          // mutations of the oracle's memories, not Q&A history.
-          if (pending.mode === 'read') {
-            await safeRecordQuery(oracleId, pending.message, response, durationMs, 'completed')
+
+        case 'run_update': {
+          if (msg.status === 'running') return
+          const startedAtRow = await oracleQueries.getOracleQuery(msg.runId)
+          const durationMs =
+            startedAtRow?.startedAt
+              ? Date.now() - new Date(startedAtRow.startedAt).getTime()
+              : null
+          const finalStatus: OracleQueryStatus =
+            msg.status === 'success' ? 'success' : 'failure'
+          const updated = await oracleQueries.updateOracleQuery(msg.runId, {
+            status: finalStatus,
+            response: msg.response ?? null,
+            errorMessage: msg.status === 'failure' ? (msg.error || 'Oracle run failed') : null,
+            finishedAt: new Date(),
+            durationMs: durationMs ?? undefined,
+          })
+          if (updated) {
+            this.events.emit(`update:${msg.runId}`, updated)
+            this.events.emit(`complete:${msg.runId}`, updated)
           }
-          pending.resolve({ response, durationMs })
-        } else {
-          if (pending.mode === 'read') {
-            await safeRecordQuery(oracleId, pending.message, null, durationMs, 'error')
-          }
-          pending.reject(new Error(msg.error || 'Oracle run failed'))
+          this.busy.delete(oracleId)
+          // Drain next queued query if any.
+          this.assignNextQueued(oracleId).catch((err) => {
+            logger.error({ err, oracleId }, 'Queue drain after complete failed')
+          })
+          return
         }
-        return
+
+        default: {
+          logger.warn({ oracleId, msg }, 'Unknown message type from oracle')
+        }
       }
-      default: {
-        logger.warn({ oracleId, msg }, 'Unknown message type from oracle')
-      }
+    } catch (err) {
+      logger.error({ err, oracleId, msg }, 'Error handling oracle message')
     }
   }
 }
 
-const safeRecordQuery = async (
-  oracleId: string,
-  message: string,
-  response: string | null,
-  durationMs: number,
-  status: string,
-): Promise<void> => {
-  try {
-    await oracleQueries.createOracleQuery(oracleId, message, response, durationMs, status)
-  } catch (err) {
-    logger.warn({ oracleId, err }, 'Failed to record oracle query')
-  }
+const pickString = (o: Record<string, unknown>, k: string): string | undefined => {
+  const v = o[k]
+  return typeof v === 'string' ? v : undefined
+}
+const pickNumber = (o: Record<string, unknown>, k: string): number | undefined => {
+  const v = o[k]
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined
+}
+
+const providerFromModel = (model: string | undefined): string | undefined => {
+  if (!model) return undefined
+  if (/^claude[-_]/i.test(model)) return 'anthropic'
+  return undefined
 }
 
 export const oracleRegistry = new OracleRegistry()

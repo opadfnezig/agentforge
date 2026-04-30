@@ -400,16 +400,80 @@ interface ActionFile {
 
 // Oracle system types
 export interface Scope { id: string; name: string; slug: string; description: string | null; parentId: string | null }
-export interface Oracle { id: string; name: string; slug: string; domain: string; scopeId: string | null; variant: string; status: string; stateDir: string; systemPrompt: string | null; config: Record<string,unknown> }
-export interface OracleQuery { id: string; oracleId: string; role: string; content: string; stateDiff: string | null; createdAt: string }
+export interface Oracle {
+  id: string
+  name: string
+  domain: string
+  scopeId: string | null
+  description: string | null
+  status: 'active' | 'inactive' | 'error'
+  stateDir: string
+  config: Record<string, unknown>
+  online?: boolean
+  createdAt: string
+  updatedAt: string
+}
+export type OracleMode = 'read' | 'write' | 'migrate'
+export interface OracleQuery {
+  id: string
+  oracleId: string
+  mode: OracleMode
+  message: string
+  response: string | null
+  status: 'pending' | 'queued' | 'running' | 'success' | 'failure' | 'cancelled'
+  startedAt: string | null
+  finishedAt: string | null
+  errorMessage: string | null
+  provider: string | null
+  model: string | null
+  sessionId: string | null
+  totalCostUsd: number | null
+  durationMs: number | null
+  durationApiMs: number | null
+  stopReason: string | null
+  trailer: Record<string, unknown> | null
+  resumeContext: string | null
+  parentQueryId: string | null
+  createdAt: string
+  updatedAt: string
+}
+export interface OracleLog {
+  id: string
+  queryId: string
+  timestamp: string
+  eventType: string
+  data: Record<string, unknown>
+}
 export interface OracleStateFile { name: string; content: string }
 
 // Oracles
 export const oraclesApi = {
   list: () => fetchAPI<Oracle[]>('/oracles'),
   get: (id: string) => fetchAPI<Oracle>(`/oracles/${id}`),
-  getState: (id: string) => fetchAPI<{files: OracleStateFile[]}>(`/oracles/${id}/state`),
-  query: (id: string, message: string) => fetchAPI<{response: string}>(`/oracles/${id}/query`, {method:'POST', body: JSON.stringify({message})}),
+  getState: (id: string) => fetchAPI<{ files: OracleStateFile[] }>(`/oracles/${id}/state`),
+  // Legacy synchronous query — returns the response after the run finishes.
+  // Page UI uses dispatch + stream instead.
+  query: (id: string, message: string) =>
+    fetchAPI<{ response: string }>(`/oracles/${id}/query`, { method: 'POST', body: JSON.stringify({ message }) }),
+  dispatch: (id: string, message: string, mode: OracleMode = 'read', autoApprove = true) =>
+    fetchAPI<{ queryId: string; status: OracleQuery['status']; mode: OracleMode; pending: boolean }>(
+      `/oracles/${id}/dispatch`,
+      { method: 'POST', body: JSON.stringify({ message, mode, autoApprove }) }
+    ),
+  approveQuery: (id: string, queryId: string) =>
+    fetchAPI<OracleQuery>(`/oracles/${id}/queries/${queryId}/approve`, { method: 'POST' }),
+  cancelQuery: (id: string, queryId: string) =>
+    fetchAPI<OracleQuery>(`/oracles/${id}/queries/${queryId}/cancel`, { method: 'POST' }),
+  retryQuery: (id: string, queryId: string) =>
+    fetchAPI<OracleQuery>(`/oracles/${id}/queries/${queryId}/retry`, { method: 'POST' }),
+  continueQuery: (id: string, queryId: string) =>
+    fetchAPI<OracleQuery>(`/oracles/${id}/queries/${queryId}/continue`, { method: 'POST' }),
+  editQueryMessage: (id: string, queryId: string, message: string) =>
+    fetchAPI<OracleQuery>(`/oracles/${id}/queries/${queryId}`, { method: 'PATCH', body: JSON.stringify({ message }) }),
+  listQueries: (id: string) => fetchAPI<OracleQuery[]>(`/oracles/${id}/queries`),
+  getQuery: (id: string, queryId: string) => fetchAPI<OracleQuery>(`/oracles/${id}/queries/${queryId}`),
+  listLogs: (id: string, queryId: string) => fetchAPI<OracleLog[]>(`/oracles/${id}/queries/${queryId}/logs`),
+  listQueue: (id: string) => fetchAPI<OracleQuery[]>(`/oracles/${id}/queue`),
   getQueries: (id: string) => fetchAPI<OracleQuery[]>(`/oracles/${id}/queries`),
 }
 

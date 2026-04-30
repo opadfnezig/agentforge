@@ -57,9 +57,8 @@ export default function OraclesPage() {
               </div>
               <p className="text-sm text-zinc-400 mb-4">{oracle.domain}</p>
               <div className="flex items-center gap-2">
-                <span className="px-2 py-0.5 text-xs rounded bg-zinc-800 text-zinc-400">
-                  {oracle.variant || 'domain'}
-                </span>
+                <span className={`w-2 h-2 rounded-full ${oracle.online ? 'bg-green-500' : 'bg-zinc-600'}`} />
+                <span className="text-xs text-zinc-500">{oracle.online ? 'online' : 'offline'}</span>
                 {oracle.scopeId && (
                   <span className="px-2 py-0.5 text-xs rounded bg-zinc-800 text-zinc-500">
                     scoped
