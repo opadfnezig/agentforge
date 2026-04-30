@@ -6,6 +6,7 @@ import {
 } from '../schemas/spawner.js'
 import * as queries from '../db/queries/spawners.js'
 import * as developerQueries from '../db/queries/developers.js'
+import * as researcherQueries from '../db/queries/researchers.js'
 import * as oracleQueries from '../db/queries/oracles.js'
 import {
   SpawnerClient,
@@ -333,6 +334,28 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
       }
     }
 
+    // For researcher-kind spawns: same pattern as developer — create row,
+    // inject RESEARCHER_ID + RESEARCHER_SECRET into env. No workspace mount
+    // (researcher has its own workdir with results/).
+    let createdResearcherId: string | null = null
+    if (intent.primitiveKind === 'researcher') {
+      const researcherName = intent.primitiveName.replace(/-researcher$/, '')
+      const researcher = await researcherQueries.createResearcher({
+        name: researcherName,
+      })
+      createdResearcherId = researcher.id
+      logger.info({ researcherId: researcher.id, name: researcher.name, primitiveName: intent.primitiveName }, 'Researcher row created on spawn')
+
+      spec = {
+        ...intent.spec,
+        env: {
+          ...(intent.spec.env ?? {}),
+          RESEARCHER_ID: researcher.id,
+          RESEARCHER_SECRET: researcher.secret,
+        },
+      }
+    }
+
     // First-time spawn includes compose-up + image build (e.g. ntfr-oracle
     // takes ~2min on hearth). 30s used to be the timeout — that aborted on
     // the backend mid-build, which then ran createdOracleId cleanup, which
@@ -386,9 +409,19 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
           )
         }
       }
-      if (!safeToCleanup && (createdDeveloperId || createdOracleId)) {
+      if (createdResearcherId && safeToCleanup) {
+        try {
+          await researcherQueries.updateResearcher(createdResearcherId, { status: 'destroyed' })
+        } catch (cleanupErr) {
+          logger.warn(
+            { researcherId: createdResearcherId, err: cleanupErr },
+            'Failed to mark researcher row destroyed after spawner error'
+          )
+        }
+      }
+      if (!safeToCleanup && (createdDeveloperId || createdOracleId || createdResearcherId)) {
         logger.warn(
-          { intentId: intent.id, createdDeveloperId, createdOracleId, err: message },
+          { intentId: intent.id, createdDeveloperId, createdOracleId, createdResearcherId, err: message },
           'Transport error during spawn — leaving auto-created rows in place (spawn may still complete)'
         )
       }

@@ -613,6 +613,75 @@ export const developersApi = {
   listQueue: (id: string) => fetchAPI<DeveloperRun[]>(`/developers/${id}/queue`),
 }
 
+// Researchers
+export interface Researcher {
+  id: string
+  name: string
+  scopeId: string | null
+  status: 'offline' | 'idle' | 'busy' | 'error' | 'destroyed'
+  lastHeartbeat: string | null
+  config: Record<string, unknown>
+  online?: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ResearcherRun {
+  id: string
+  researcherId: string
+  instructions: string
+  status: 'pending' | 'queued' | 'running' | 'success' | 'failure' | 'cancelled'
+  response: string | null
+  startedAt: string | null
+  finishedAt: string | null
+  errorMessage: string | null
+  provider: string | null
+  model: string | null
+  sessionId: string | null
+  totalCostUsd: number | null
+  durationMs: number | null
+  durationApiMs: number | null
+  stopReason: string | null
+  trailer: Record<string, unknown> | null
+  resumeContext: string | null
+  parentRunId: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ResearcherLog {
+  id: string
+  runId: string
+  timestamp: string
+  eventType: string
+  data: Record<string, unknown>
+}
+
+export const researchersApi = {
+  list: () => fetchAPI<Researcher[]>('/researchers'),
+  get: (id: string) => fetchAPI<Researcher>(`/researchers/${id}`),
+  create: (data: {name: string}) =>
+    fetchAPI<Researcher & {secret: string}>('/researchers', {method: 'POST', body: JSON.stringify(data)}),
+  delete: (id: string) => fetchAPI<void>(`/researchers/${id}`, {method: 'DELETE'}),
+  regenerateSecret: (id: string) => fetchAPI<{secret: string}>(`/researchers/${id}/secret`, {method: 'POST'}),
+  dispatch: (id: string, instructions: string, autoApprove = true) =>
+    fetchAPI<{runId: string; status: ResearcherRun['status']; queued: boolean; pending: boolean}>(`/researchers/${id}/dispatch`, {method: 'POST', body: JSON.stringify({instructions, autoApprove})}),
+  approveRun: (id: string, runId: string) =>
+    fetchAPI<ResearcherRun>(`/researchers/${id}/runs/${runId}/approve`, {method: 'POST'}),
+  cancelRun: (id: string, runId: string) =>
+    fetchAPI<ResearcherRun>(`/researchers/${id}/runs/${runId}/cancel`, {method: 'POST'}),
+  retryRun: (id: string, runId: string) =>
+    fetchAPI<ResearcherRun>(`/researchers/${id}/runs/${runId}/retry`, {method: 'POST'}),
+  continueRun: (id: string, runId: string) =>
+    fetchAPI<ResearcherRun>(`/researchers/${id}/runs/${runId}/continue`, {method: 'POST'}),
+  editRunInstructions: (id: string, runId: string, instructions: string) =>
+    fetchAPI<ResearcherRun>(`/researchers/${id}/runs/${runId}`, {method: 'PATCH', body: JSON.stringify({instructions})}),
+  listRuns: (id: string) => fetchAPI<ResearcherRun[]>(`/researchers/${id}/runs`),
+  getRun: (id: string, runId: string) => fetchAPI<ResearcherRun>(`/researchers/${id}/runs/${runId}`),
+  listLogs: (id: string, runId: string) => fetchAPI<ResearcherLog[]>(`/researchers/${id}/runs/${runId}/logs`),
+  listQueue: (id: string) => fetchAPI<ResearcherRun[]>(`/researchers/${id}/queue`),
+}
+
 export type {
   Project,
   CreateProject,

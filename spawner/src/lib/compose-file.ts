@@ -27,6 +27,7 @@ interface ComposeService {
 export const KIND_BUILD_CONTEXT: Record<string, string | undefined> = {
   developer: '/src/developer',
   oracle: '/src/oracle',
+  researcher: '/src/researcher',
 }
 
 // Derive the WS coordinator URL from NTFR_SERVER_URL when no explicit
@@ -68,6 +69,12 @@ const buildKindEnv = (kind: string): Record<string, string> => {
     if (coord) env.COORDINATOR_URL = coord
     return env
   }
+  if (kind === 'researcher') {
+    const env: Record<string, string> = { WORKSPACE_PATH: '/workspace' }
+    const coord = deriveCoordinatorUrl()
+    if (coord) env.COORDINATOR_URL = coord
+    return env
+  }
   return {}
 }
 
@@ -88,6 +95,16 @@ const buildKindVolumes = (kind: string, name: string): string[] => {
       // Persistent memory for Claude CLI. Same path encoding as oracle
       // (WORKDIR=/workspace → ~/.claude/projects/-workspace/memory).
       `./${name}/memories:/home/agent/.claude/projects/-workspace/memory:rw`,
+    ]
+  }
+  if (kind === 'researcher') {
+    return [
+      // OAuth token for Claude CLI.
+      '/var/lib/claude-creds/credentials.json:/home/agent/.claude/.credentials.json:ro',
+      // Persistent memory across runs.
+      `./${name}/memories:/home/agent/.claude/projects/-workspace/memory:rw`,
+      // Results directory for research output.
+      `./${name}/results:/workspace/results:rw`,
     ]
   }
   if (kind === 'oracle') {
