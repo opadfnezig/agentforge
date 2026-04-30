@@ -535,6 +535,7 @@ const parseSpawnCommands = (output: string): ParsedSpawnCommand[] => {
 }
 
 interface SpawnResult {
+  spawnerHostId: string | null
   hostId: string
   primitiveName: string
   intentId: string | null
@@ -894,6 +895,7 @@ const executeStage = async (
       cmds.spawns.map(async (s): Promise<SpawnResult> => {
         if (s.parseError || !s.spec) {
           return {
+            spawnerHostId: null,
             hostId: s.hostId,
             primitiveName: s.primitiveName,
             intentId: null,
@@ -906,6 +908,7 @@ const executeStage = async (
         const imageLabel = s.spec.image ?? `local-build:${s.spec.kind}`
         if (!host) {
           return {
+            spawnerHostId: null,
             hostId: s.hostId,
             primitiveName: s.primitiveName,
             intentId: null,
@@ -937,6 +940,7 @@ const executeStage = async (
             queued: false,
           })
           return {
+            spawnerHostId: host.id,
             hostId: s.hostId,
             primitiveName: s.primitiveName,
             intentId: intent.id,
@@ -947,6 +951,7 @@ const executeStage = async (
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           return {
+            spawnerHostId: host.id,
             hostId: s.hostId,
             primitiveName: s.primitiveName,
             intentId: null,

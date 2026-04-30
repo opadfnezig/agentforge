@@ -245,9 +245,9 @@ const persistAssistantMessage = async (
     report: r.report,
   }))
   const spawns = accumulator.spawnResults
-    .filter((s) => !s.error && s.intentId && s.primitiveKind)
+    .filter((s) => !s.error && s.intentId && s.primitiveKind && s.spawnerHostId)
     .map((s) => ({
-      spawnerHostId: s.hostId,
+      spawnerHostId: s.spawnerHostId!,
       hostId: s.hostId,
       primitiveName: s.primitiveName,
       primitiveKind: s.primitiveKind!,
