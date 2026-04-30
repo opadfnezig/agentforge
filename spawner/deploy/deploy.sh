@@ -95,16 +95,21 @@ for i in $(seq 1 20); do
 
     # Rebuild + restart any primitives the spawner already manages so they
     # pick up source changes in developer/oracle/researcher and the new
-    # base image. `docker compose build` only rebuilds layers whose context
-    # actually changed, so this is cheap when nothing has been touched.
-    PRIMITIVE_COMPOSE="${NTFR_HOST_WORKDIR}/compose.yml"
-    if [[ -f "${PRIMITIVE_COMPOSE}" ]]; then
-      echo "Rebuilding primitive images from ${PRIMITIVE_COMPOSE}..."
-      docker compose -f "${PRIMITIVE_COMPOSE}" build
+    # base image. The compose file uses container-internal paths
+    # (e.g. /src/oracle) which only exist *inside* the spawner container,
+    # so we shell into it via `docker exec` rather than running compose
+    # from the host shell. The spawner's docker CLI talks to the host
+    # daemon over the mounted socket, so the host actually performs the
+    # build — but the build context is tarballed from the spawner's view
+    # of the filesystem where /src is mounted.
+    PRIMITIVE_COMPOSE_IN_CONTAINER="${NTFR_WORKDIR_IN_CONTAINER:-${NTFR_HOST_WORKDIR}}/compose.yml"
+    if docker exec ntfr-spawner test -f "${PRIMITIVE_COMPOSE_IN_CONTAINER}" 2>/dev/null; then
+      echo "Rebuilding primitive images from ${PRIMITIVE_COMPOSE_IN_CONTAINER} (inside spawner)..."
+      docker exec ntfr-spawner docker compose -f "${PRIMITIVE_COMPOSE_IN_CONTAINER}" build
       echo "Restarting primitives (recreated only if image hash changed)..."
-      docker compose -f "${PRIMITIVE_COMPOSE}" up -d
+      docker exec ntfr-spawner docker compose -f "${PRIMITIVE_COMPOSE_IN_CONTAINER}" up -d
     else
-      echo "No managed compose at ${PRIMITIVE_COMPOSE} yet — skipping primitive rebuild."
+      echo "No managed compose at ${PRIMITIVE_COMPOSE_IN_CONTAINER} (inside spawner) yet — skipping primitive rebuild."
     fi
 
     exit 0
