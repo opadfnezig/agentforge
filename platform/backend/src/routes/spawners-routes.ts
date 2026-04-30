@@ -217,11 +217,20 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
     // For developer-kind spawns: create the backing developer row up front
     // so we can pass DEVELOPER_ID + DEVELOPER_SECRET to the container as env.
     // The developer process inside the container connects back to the
-    // backend WS with these credentials and registers itself. COORDINATOR_URL
-    // and WORKSPACE_PATH are injected by the spawner per kind.
+    // backend WS with these credentials and registers itself.
     //
     // Naming: primitive is `<subject>-dev` on the host; developer.name is
     // the bare subject. Strip suffix to derive identity.
+    //
+    // Source-code mount: the model passes the host repo path via spec
+    // `workdir`. Spawner-side does NOT auto-translate workdir into a
+    // bind-mount — it just sets WORKSPACE_PATH=/workspace and points the
+    // worker at an empty placeholder dir, leaving the container with no
+    // source. So we translate it ourselves: workdir → mount
+    // {source: <host>, target: /workspace, rw} and clear the field
+    // before forwarding (so the spawner doesn't get a host path it
+    // misinterprets). /workspace is canonical inside the container —
+    // developer/entrypoint.sh hardcodes git safe.directory /workspace.
     let createdDeveloperId: string | null = null
     let spec = intent.spec
     if (intent.primitiveKind === 'developer') {
@@ -232,13 +241,22 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
       })
       createdDeveloperId = dev.id
       logger.info({ developerId: dev.id, name: dev.name, primitiveName: intent.primitiveName }, 'Developer row created on spawn')
+
+      const userMountTargets = new Set((intent.spec.mounts ?? []).map((m) => m.target))
+      const sourceCodeMount =
+        intent.spec.workdir && !userMountTargets.has('/workspace')
+          ? [{ source: intent.spec.workdir, target: '/workspace', readOnly: false }]
+          : []
+
+      const { workdir: _droppedWorkdir, ...specWithoutWorkdir } = intent.spec
       spec = {
-        ...intent.spec,
+        ...specWithoutWorkdir,
         env: {
           ...(intent.spec.env ?? {}),
           DEVELOPER_ID: dev.id,
           DEVELOPER_SECRET: dev.secret,
         },
+        mounts: [...(intent.spec.mounts ?? []), ...sourceCodeMount],
       }
     }
 
