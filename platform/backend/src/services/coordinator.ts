@@ -228,9 +228,12 @@ args: ["--flag"]
 
 The body is YAML. Required field: \`kind\` (developer | researcher | oracle). \`image\` is optional — when omitted, the spawner builds the primitive from the host's local source tree based on \`kind\`. Only set \`image\` if you have a real registry tag in mind; otherwise leave it out. All other fields are optional. \`primitive-name\` must match \`[a-z0-9][a-z0-9_-]*\` and is unique per host. Spawning a primitive does NOT register a developer in this app — that's a separate manual step (or a future automation). Use [spawn, ...] when the user explicitly asks for a new container; do not spawn opportunistically.
 
-**Naming convention by kind** — primitive name = container name on the host, so prefix it by kind for grep-ability:
-- \`kind: oracle\` → \`primitive-name\` MUST be \`oracle-<name>\` (e.g. \`oracle-hearth\`, \`oracle-trading\`). The \`oracle-\` prefix is stripped server-side to derive the underlying oracle name / domain / state_dir; only the container is prefixed.
-- \`kind: developer\` / \`kind: researcher\` → no prefix required.
+**Naming convention** — primitive name = container name on the host. Use \`<subject>-<suffix>\` where the suffix names the kind, so containers are greppable and self-describing:
+- \`kind: oracle\` → \`primitive-name\` MUST end in \`-oracle\` (e.g. \`hearth-oracle\`, \`trading-oracle\`).
+- \`kind: developer\` → \`primitive-name\` MUST end in \`-dev\` (e.g. \`agentforge-dev\`).
+- \`kind: researcher\` → \`primitive-name\` MUST end in \`-researcher\`.
+
+The suffix is stripped server-side to derive the underlying entity's identity. \`hearth-oracle\` becomes \`oracle.name = hearth\` in the DB; \`agentforge-dev\` becomes \`developer.name = agentforge\`. The container/primitive keeps the suffixed form.
 
 **Oracle spawns: do NOT include \`mounts:\`** in the YAML body. The backend auto-injects the two persistence mounts every oracle worker needs (memory + data ingest). User-supplied mounts on oracle spawns are dropped server-side. The minimum viable oracle spawn body is just \`kind: oracle\`. Same rule: skip \`image:\` unless you have a real registry tag.
 
@@ -492,15 +495,21 @@ const parseSpawnCommands = (output: string): ParsedSpawnCommand[] => {
         if (!kind || !PRIMITIVE_KINDS.includes(kind as PrimitiveKind)) {
           parseError = `kind must be one of ${PRIMITIVE_KINDS.join(' | ')} (got ${JSON.stringify(kind)})`
         } else {
-          // Naming convention: oracle primitives are container-prefixed
-          // `oracle-<name>` so they're greppable on the host (and the
-          // approve handler strips the prefix to derive the underlying
-          // oracle.name / domain / state_dir). If the model forgot the
-          // prefix, we add it defensively rather than failing — log so we
-          // notice if the prompt drifts.
-          if (kind === 'oracle' && !primitiveName.startsWith('oracle-')) {
-            logger.warn({ primitiveName }, 'Oracle spawn missing oracle- prefix; auto-prefixing')
-            primitiveName = `oracle-${primitiveName}`
+          // Naming convention: primitives are container-suffixed
+          // `<subject>-<kind>` so they're self-describing on the host
+          // (the approve handler strips the suffix to derive the
+          // underlying entity name). If the model forgets the suffix,
+          // append it defensively rather than failing — log so we
+          // notice prompt drift.
+          const suffixByKind: Record<string, string> = {
+            oracle: '-oracle',
+            developer: '-dev',
+            researcher: '-researcher',
+          }
+          const suffix = suffixByKind[kind as string]
+          if (suffix && !primitiveName.endsWith(suffix)) {
+            logger.warn({ primitiveName, kind, suffix }, 'Spawn primitive missing kind suffix; auto-appending')
+            primitiveName = `${primitiveName}${suffix}`
           }
           const candidate = {
             ...(parsed as Record<string, unknown>),

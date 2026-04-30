@@ -219,14 +219,19 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
     // The developer process inside the container connects back to the
     // backend WS with these credentials and registers itself. COORDINATOR_URL
     // and WORKSPACE_PATH are injected by the spawner per kind.
+    //
+    // Naming: primitive is `<subject>-dev` on the host; developer.name is
+    // the bare subject. Strip suffix to derive identity.
     let createdDeveloperId: string | null = null
     let spec = intent.spec
     if (intent.primitiveKind === 'developer') {
+      const developerName = intent.primitiveName.replace(/-dev$/, '')
       const dev = await developerQueries.createDeveloper({
-        name: intent.primitiveName,
+        name: developerName,
         workspacePath: '/workspace',
       })
       createdDeveloperId = dev.id
+      logger.info({ developerId: dev.id, name: dev.name, primitiveName: intent.primitiveName }, 'Developer row created on spawn')
       spec = {
         ...intent.spec,
         env: {
@@ -244,13 +249,12 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
     // customisations. Otherwise we create with sensible defaults:
     // domain = oracleName, stateDir = ${ORACLE_STATE_DIR}/${oracleName}.
     //
-    // The primitive (container) name is `oracle-<name>` for grep-ability
-    // on the host; the underlying oracle row uses the unprefixed name as
-    // its identity. Strip the prefix here so DB rows and on-disk state
-    // dirs stay clean (`hearth`, not `oracle-hearth`).
+    // Naming: primitive is `<subject>-oracle` on the host; oracle row's
+    // name / domain / state_dir use the bare subject. Strip suffix to
+    // derive identity.
     let createdOracleId: string | null = null
     if (intent.primitiveKind === 'oracle') {
-      const oracleName = intent.primitiveName.replace(/^oracle-/, '')
+      const oracleName = intent.primitiveName.replace(/-oracle$/, '')
       let oracle = await oracleQueries.getOracleByName(oracleName)
       if (!oracle) {
         oracle = await oracleQueries.createOracle({
