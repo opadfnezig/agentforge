@@ -23,7 +23,7 @@ services:
     environment:
       NTFR_HOST_ID: ${NTFR_HOST_ID:?NTFR_HOST_ID is required}
       NTFR_PORT: ${NTFR_PORT:-9898}
-      NTFR_WORKDIR: /ntfr
+      NTFR_WORKDIR: ${NTFR_HOST_WORKDIR:-/home/ntfr/ntfr}
       NTFR_SERVER_URL: ${NTFR_SERVER_URL:-}
       NTFR_LOG_LEVEL: ${NTFR_LOG_LEVEL:-info}
       DOCKER_SOCKET: /var/run/docker.sock
@@ -37,7 +37,7 @@ services:
       # Host's primitive root. Spawner reads/writes here, and primitives'
       # bind mounts in the managed compose.yml resolve to subpaths under
       # this directory.
-      - ${NTFR_HOST_WORKDIR:-/home/ntfr/ntfr}:/ntfr
+      - ${NTFR_HOST_WORKDIR:-/home/ntfr/ntfr}:${NTFR_HOST_WORKDIR:-/home/ntfr/ntfr}
       # Source tree for kind-based local builds (developer/researcher/…).
       # The spawner shells out to `docker compose build` using hardcoded
       # contexts under /src — those paths must be readable

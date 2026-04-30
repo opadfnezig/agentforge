@@ -37,11 +37,12 @@ RUN npm install --no-fund --no-audit \
 
 ENV NODE_ENV=production
 ENV NTFR_PORT=9898
-ENV NTFR_WORKDIR=/ntfr
+ENV NTFR_WORKDIR=/ntfr/ntfr
 
-# Ensure /ntfr exists and is owned by the ntfr user. The host's ~/ntfr is
-# bind-mounted on top of this at runtime.
-RUN mkdir -p /ntfr && chown -R ntfr:ntfr /ntfr /app
+# Ensure workdir exists and is owned by the ntfr user. The host's workdir
+# is bind-mounted on top at runtime (at the same path, so Docker daemon
+# and spawner see identical paths for compose file + volume sources).
+RUN mkdir -p /ntfr/ntfr && chown -R ntfr:ntfr /ntfr /app
 
 EXPOSE 9898
 
