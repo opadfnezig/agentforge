@@ -519,10 +519,12 @@ export interface Developer {
   updatedAt: string
 }
 
+export type DeveloperRunMode = 'implement' | 'clarify' | 'chat'
+
 export interface DeveloperRun {
   id: string
   developerId: string
-  mode: 'implement' | 'clarify'
+  mode: DeveloperRunMode
   instructions: string
   status: 'pending' | 'queued' | 'running' | 'success' | 'failure' | 'cancelled' | 'no_changes'
   gitShaStart: string | null
@@ -543,6 +545,7 @@ export interface DeveloperRun {
   pushError: string | null
   resumeContext: string | null
   parentRunId: string | null
+  chatId: string | null
   createdAt: string
 }
 
@@ -553,6 +556,18 @@ export interface DeveloperLog {
   eventType: string
   data: Record<string, unknown>
 }
+
+export interface DeveloperChat {
+  id: string
+  developerId: string
+  title: string | null
+  claudeSessionId: string | null
+  lastMessageAt: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface DeveloperStateFile { name: string; content: string }
 
 // Spawner hosts
 // -----------------------------------------------------------------------------
@@ -685,8 +700,15 @@ export const developersApi = {
     fetchAPI<Developer & {secret: string}>('/developers', {method: 'POST', body: JSON.stringify(data)}),
   delete: (id: string) => fetchAPI<void>(`/developers/${id}`, {method: 'DELETE'}),
   regenerateSecret: (id: string) => fetchAPI<{secret: string}>(`/developers/${id}/secret`, {method: 'POST'}),
-  dispatch: (id: string, instructions: string, mode: 'implement' | 'clarify' = 'implement', autoApprove = true) =>
-    fetchAPI<{runId: string; status: DeveloperRun['status']; queued: boolean; pending: boolean}>(`/developers/${id}/dispatch`, {method: 'POST', body: JSON.stringify({instructions, mode, autoApprove})}),
+  dispatch: (
+    id: string,
+    instructions: string,
+    opts: { mode?: DeveloperRunMode; autoApprove?: boolean; chatId?: string } = {}
+  ) =>
+    fetchAPI<{runId: string; status: DeveloperRun['status']; queued: boolean; pending: boolean}>(
+      `/developers/${id}/dispatch`,
+      { method: 'POST', body: JSON.stringify({ instructions, mode: opts.mode ?? 'implement', autoApprove: opts.autoApprove ?? true, chatId: opts.chatId }) }
+    ),
   approveRun: (id: string, runId: string) =>
     fetchAPI<DeveloperRun>(`/developers/${id}/runs/${runId}/approve`, {method: 'POST'}),
   cancelRun: (id: string, runId: string) =>
@@ -701,6 +723,20 @@ export const developersApi = {
   getRun: (id: string, runId: string) => fetchAPI<DeveloperRun>(`/developers/${id}/runs/${runId}`),
   listLogs: (id: string, runId: string) => fetchAPI<DeveloperLog[]>(`/developers/${id}/runs/${runId}/logs`),
   listQueue: (id: string) => fetchAPI<DeveloperRun[]>(`/developers/${id}/queue`),
+  // Chats
+  createChat: (id: string, title?: string) =>
+    fetchAPI<DeveloperChat>(`/developers/${id}/chats`, { method: 'POST', body: JSON.stringify({ title }) }),
+  promoteRunToChat: (id: string, runId: string) =>
+    fetchAPI<DeveloperChat>(`/developers/${id}/runs/${runId}/promote-to-chat`, { method: 'POST' }),
+  listChats: (id: string) => fetchAPI<DeveloperChat[]>(`/developers/${id}/chats`),
+  getChat: (id: string, chatId: string) =>
+    fetchAPI<{ chat: DeveloperChat; messages: DeveloperRun[] }>(`/developers/${id}/chats/${chatId}`),
+  updateChatTitle: (id: string, chatId: string, title: string | null) =>
+    fetchAPI<DeveloperChat>(`/developers/${id}/chats/${chatId}`, { method: 'PATCH', body: JSON.stringify({ title }) }),
+  deleteChat: (id: string, chatId: string) =>
+    fetchAPI<void>(`/developers/${id}/chats/${chatId}`, { method: 'DELETE' }),
+  // Memory state files
+  getState: (id: string) => fetchAPI<{ files: DeveloperStateFile[] }>(`/developers/${id}/state`),
 }
 
 // Researchers

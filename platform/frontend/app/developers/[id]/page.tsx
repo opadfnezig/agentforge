@@ -5,52 +5,94 @@ import { useParams } from 'next/navigation'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Button } from '@/components/ui/button'
-import { developersApi, type Developer, type DeveloperRun, type DeveloperLog } from '@/lib/api'
+import {
+  developersApi,
+  type Developer,
+  type DeveloperRun,
+  type DeveloperLog,
+  type DeveloperRunMode,
+  type DeveloperChat,
+  type DeveloperStateFile,
+} from '@/lib/api'
 
 const TERMINAL_STATUSES = new Set(['success', 'failure', 'cancelled', 'no_changes'])
+
+const MODES: { value: DeveloperRunMode; label: string; hint: string }[] = [
+  { value: 'implement', label: 'Implement', hint: 'Make code changes, commit, push.' },
+  { value: 'clarify', label: 'Clarify', hint: 'Read code, ask questions. No edits.' },
+  { value: 'chat', label: 'Chat', hint: 'Multi-turn — start new chat or use existing.' },
+]
+
+type Selection =
+  | { kind: 'run'; id: string }
+  | { kind: 'chat'; id: string }
+  | null
+
+type ListTab = 'chats' | 'runs'
 
 export default function DeveloperDetailPage() {
   const params = useParams()
   const id = params.id as string
 
+  // ---- top-level data ----
   const [developer, setDeveloper] = useState<Developer | null>(null)
   const [runs, setRuns] = useState<DeveloperRun[]>([])
+  const [chats, setChats] = useState<DeveloperChat[]>([])
+  const [stateFiles, setStateFiles] = useState<DeveloperStateFile[]>([])
   const [error, setError] = useState<string | null>(null)
 
+  // ---- ui state ----
+  const [listTab, setListTab] = useState<ListTab>('chats')
+  const [selection, setSelection] = useState<Selection>(null)
+  const [selectedFile, setSelectedFile] = useState<string | null>(null)
+
+  // ---- dispatch form ----
   const [instructions, setInstructions] = useState('')
-  const [mode, setMode] = useState<'implement' | 'clarify'>('implement')
+  const [mode, setMode] = useState<DeveloperRunMode>('implement')
   const [dispatching, setDispatching] = useState(false)
   const [dispatchError, setDispatchError] = useState<string | null>(null)
 
-  const [activeRunId, setActiveRunId] = useState<string | null>(null)
+  // ---- run detail ----
   const [activeRun, setActiveRun] = useState<DeveloperRun | null>(null)
   const [logs, setLogs] = useState<DeveloperLog[]>([])
-  const [copiedSecret, setCopiedSecret] = useState(false)
-  const [regenSecret, setRegenSecret] = useState<string | null>(null)
+  const [expandedLogIds, setExpandedLogIds] = useState<Set<string>>(new Set())
+
+  // ---- chat thread ----
+  const [activeChat, setActiveChat] = useState<DeveloperChat | null>(null)
+  const [chatMessages, setChatMessages] = useState<DeveloperRun[]>([])
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const logScrollRef = useRef<HTMLDivElement>(null)
+  const detailScrollRef = useRef<HTMLDivElement>(null)
 
-  // Wall-clock tick so in-progress durations advance independently of the
-  // event stream / run poll. formatDuration reads `now` below.
   const now = useNow(1000)
 
+  // ---- loaders ----
   const refreshRuns = useCallback(() => {
     developersApi.listRuns(id).then(setRuns).catch(() => {})
+  }, [id])
+
+  const refreshChats = useCallback(() => {
+    developersApi.listChats(id).then(setChats).catch(() => {})
+  }, [id])
+
+  const refreshState = useCallback(() => {
+    developersApi.getState(id).then(res => setStateFiles(res.files)).catch(() => {})
   }, [id])
 
   useEffect(() => {
     developersApi.get(id).then(setDeveloper).catch(err => setError(err.message))
     refreshRuns()
-  }, [id, refreshRuns])
+    refreshChats()
+    refreshState()
+  }, [id, refreshRuns, refreshChats, refreshState])
 
-  // Auto-scroll log viewer
   useEffect(() => {
-    if (logScrollRef.current) {
-      logScrollRef.current.scrollTop = logScrollRef.current.scrollHeight
+    if (detailScrollRef.current) {
+      detailScrollRef.current.scrollTop = detailScrollRef.current.scrollHeight
     }
-  }, [logs])
+  }, [logs, chatMessages])
 
+  // ---- polling ----
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
       clearInterval(pollRef.current)
@@ -72,29 +114,95 @@ export default function DeveloperDetailPage() {
           stopPolling()
           refreshRuns()
         }
-      } catch {
-        // keep polling; transient errors
-      }
+      } catch { /* keep polling */ }
     }
     tick()
     pollRef.current = setInterval(tick, 1500)
   }, [id, refreshRuns, stopPolling])
 
-  useEffect(() => {
-    return () => stopPolling()
-  }, [stopPolling])
+  const pollChat = useCallback((chatId: string) => {
+    stopPolling()
+    const tick = async () => {
+      try {
+        const { chat, messages } = await developersApi.getChat(id, chatId)
+        setActiveChat(chat)
+        setChatMessages(messages)
+        if (messages.every(m => TERMINAL_STATUSES.has(m.status))) {
+          stopPolling()
+          refreshChats()
+          refreshRuns()
+          refreshState()
+        }
+      } catch { /* keep polling */ }
+    }
+    tick()
+    pollRef.current = setInterval(tick, 1500)
+  }, [id, refreshChats, refreshRuns, refreshState, stopPolling])
 
-  const handleDispatch = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!instructions.trim() || dispatching) return
+  useEffect(() => () => stopPolling(), [stopPolling])
+
+  // ---- selection ----
+  const selectRun = useCallback((r: DeveloperRun) => {
+    if (r.chatId) {
+      setSelection({ kind: 'chat', id: r.chatId })
+      return
+    }
+    setSelection({ kind: 'run', id: r.id })
+    setActiveRun(r)
+    setLogs([])
+    if (TERMINAL_STATUSES.has(r.status)) {
+      stopPolling()
+      developersApi.listLogs(id, r.id).then(setLogs).catch(() => {})
+    } else {
+      pollRun(r.id)
+    }
+  }, [id, pollRun, stopPolling])
+
+  const selectChat = useCallback((c: DeveloperChat) => {
+    setSelection({ kind: 'chat', id: c.id })
+    setActiveChat(c)
+    setChatMessages([])
+    pollChat(c.id)
+  }, [pollChat])
+
+  useEffect(() => {
+    if (!selection) return
+    if (selection.kind === 'run') {
+      const r = runs.find(rr => rr.id === selection.id)
+      if (r) selectRun(r)
+    } else if (selection.kind === 'chat') {
+      const c = chats.find(cc => cc.id === selection.id)
+      if (c) selectChat(c)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selection?.kind, selection?.id])
+
+  // ---- dispatch / chat actions ----
+  const handleSendInChat = async (text: string) => {
+    if (!selection || selection.kind !== 'chat') return
     setDispatching(true)
     setDispatchError(null)
     try {
-      const { runId } = await developersApi.dispatch(id, instructions.trim(), mode)
-      setActiveRunId(runId)
+      await developersApi.dispatch(id, text, { mode: 'chat', chatId: selection.id })
+      setInstructions('')
+      pollChat(selection.id)
+      refreshChats()
+    } catch (err) {
+      setDispatchError(err instanceof Error ? err.message : 'Send failed')
+    } finally {
+      setDispatching(false)
+    }
+  }
+
+  const handleDispatchOneShot = async (text: string) => {
+    setDispatching(true)
+    setDispatchError(null)
+    try {
+      const { runId } = await developersApi.dispatch(id, text, { mode })
+      setInstructions('')
+      setSelection({ kind: 'run', id: runId })
       setActiveRun(null)
       setLogs([])
-      setInstructions('')
       pollRun(runId)
       refreshRuns()
     } catch (err) {
@@ -104,30 +212,87 @@ export default function DeveloperDetailPage() {
     }
   }
 
-  const viewRun = (runId: string) => {
-    setActiveRunId(runId)
-    setActiveRun(null)
-    setLogs([])
-    pollRun(runId)
-  }
-
-  const handleRegenSecret = async () => {
-    if (!confirm('Regenerate secret? The old secret will stop working.')) return
-    try {
-      const res = await developersApi.regenerateSecret(id)
-      setRegenSecret(res.secret)
-    } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to regenerate secret')
+  const submitDispatch = (e: React.FormEvent) => {
+    e.preventDefault()
+    const text = instructions.trim()
+    if (!text) return
+    if (selection?.kind === 'chat') {
+      handleSendInChat(text)
+    } else {
+      handleDispatchOneShot(text)
     }
   }
 
-  const handleCopySecret = async () => {
-    if (!regenSecret) return
+  const handleNewChat = async () => {
     try {
-      await navigator.clipboard.writeText(regenSecret)
-      setCopiedSecret(true)
-      setTimeout(() => setCopiedSecret(false), 2000)
-    } catch {}
+      const chat = await developersApi.createChat(id)
+      refreshChats()
+      setListTab('chats')
+      setSelection({ kind: 'chat', id: chat.id })
+      setActiveChat(chat)
+      setChatMessages([])
+    } catch (err) {
+      setDispatchError(err instanceof Error ? err.message : 'New chat failed')
+    }
+  }
+
+  const handlePromoteToChat = async (runId: string) => {
+    try {
+      const chat = await developersApi.promoteRunToChat(id, runId)
+      refreshChats()
+      refreshRuns()
+      setListTab('chats')
+      setSelection({ kind: 'chat', id: chat.id })
+    } catch (err) {
+      setDispatchError(err instanceof Error ? err.message : 'Promote failed')
+    }
+  }
+
+  const handleApprove = async (runId: string) => {
+    try { await developersApi.approveRun(id, runId); pollRun(runId); refreshRuns() }
+    catch (err) { setDispatchError(err instanceof Error ? err.message : 'Approve failed') }
+  }
+  const handleCancel = async (runId: string) => {
+    try {
+      await developersApi.cancelRun(id, runId)
+      refreshRuns()
+      if (selection?.kind === 'run' && selection.id === runId) {
+        const r = await developersApi.getRun(id, runId); setActiveRun(r)
+      }
+    } catch (err) { setDispatchError(err instanceof Error ? err.message : 'Cancel failed') }
+  }
+  const handleRetry = async (runId: string, withContext: boolean) => {
+    try {
+      const child = withContext
+        ? await developersApi.continueRun(id, runId)
+        : await developersApi.retryRun(id, runId)
+      setSelection({ kind: 'run', id: child.id })
+      setActiveRun(child)
+      setLogs([])
+      pollRun(child.id)
+      refreshRuns()
+    } catch (err) { setDispatchError(err instanceof Error ? err.message : 'Retry failed') }
+  }
+  const handleDeleteChat = async (chatId: string) => {
+    if (!confirm('Delete this chat? Run history is preserved.')) return
+    try {
+      await developersApi.deleteChat(id, chatId)
+      refreshChats()
+      if (selection?.kind === 'chat' && selection.id === chatId) {
+        setSelection(null)
+        setActiveChat(null)
+        setChatMessages([])
+      }
+    } catch (err) { setDispatchError(err instanceof Error ? err.message : 'Delete failed') }
+  }
+
+  const toggleExpandedLog = (logId: string) => {
+    setExpandedLogIds(prev => {
+      const next = new Set(prev)
+      if (next.has(logId)) next.delete(logId)
+      else next.add(logId)
+      return next
+    })
   }
 
   if (error) {
@@ -137,780 +302,615 @@ export default function DeveloperDetailPage() {
       </div>
     )
   }
-
   if (!developer) {
     return (
-      <div className="container mx-auto py-16 text-center text-zinc-500">
-        Loading developer...
-      </div>
+      <div className="container mx-auto py-16 text-center text-zinc-500">Loading developer...</div>
     )
   }
+
+  const selectedFileObj = stateFiles.find(f => f.name === selectedFile) ?? null
+  const standaloneRuns = runs.filter(r => !r.chatId)
 
   return (
     <div className="flex flex-col h-[calc(100vh-3.5rem)] bg-zinc-950">
       {/* Header */}
-      <div className="border-b border-zinc-800 px-6 py-4 flex items-center gap-4">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <OnlineDot online={developer.online} />
-            <h1 className="text-xl font-bold truncate">{developer.name}</h1>
-          </div>
-          <p className="text-sm text-zinc-500 font-mono truncate">{developer.workspacePath}</p>
+      <div className="border-b border-zinc-800 px-6 py-3 flex items-center gap-4 flex-wrap">
+        <div className="flex items-center gap-2">
+          <span className={`w-2 h-2 rounded-full ${developer.online ? 'bg-green-500' : 'bg-zinc-600'}`} />
+          <h1 className="text-lg font-bold">{developer.name}</h1>
         </div>
-        <span className="px-2 py-0.5 text-xs rounded bg-zinc-800 text-zinc-400 font-mono">
-          {developer.gitBranch}
-        </span>
-        <StatusBadge status={developer.status} />
-        <Button variant="secondary" size="sm" onClick={handleRegenSecret}>
-          Regenerate Secret
-        </Button>
+        <span className={`px-2 py-0.5 text-xs font-medium rounded ${
+          developer.status === 'idle' ? 'bg-green-900 text-green-200' :
+          developer.status === 'busy' ? 'bg-violet-900 text-violet-200' :
+          developer.status === 'error' ? 'bg-red-900 text-red-200' :
+          'bg-zinc-800 text-zinc-400'
+        }`}>{developer.status}</span>
+        <span className="text-xs text-zinc-600 font-mono truncate">{developer.workspacePath}</span>
+        {developer.gitRepo && <span className="text-xs text-zinc-500 truncate">{developer.gitRepo}</span>}
+        {developer.gitBranch && <span className="text-xs text-zinc-500">@{developer.gitBranch}</span>}
+        {!developer.online && (
+          <span className="ml-auto text-xs text-amber-400">offline — spawn the container</span>
+        )}
       </div>
 
-      {regenSecret && (
-        <div className="border-b border-yellow-800 bg-yellow-950/30 px-6 py-3 flex items-center gap-3">
-          <p className="text-sm text-yellow-300">New secret (copy now, shown once):</p>
-          <code className="flex-1 px-3 py-1 rounded bg-zinc-950 border border-zinc-800 font-mono text-sm text-zinc-200 truncate">
-            {regenSecret}
-          </code>
-          <Button variant="secondary" size="sm" onClick={handleCopySecret}>
-            {copiedSecret ? 'Copied!' : 'Copy'}
-          </Button>
-          <button
-            onClick={() => setRegenSecret(null)}
-            className="text-yellow-400 hover:text-yellow-200 text-sm"
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
-
-      {/* Two-column layout */}
+      {/* Body */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left: Info + runs */}
-        <div className="w-1/2 border-r border-zinc-800 overflow-y-auto p-4 space-y-4">
-          <section>
-            <h2 className="text-sm font-semibold text-zinc-400 uppercase tracking-wide mb-2">
-              Info
-            </h2>
-            <dl className="rounded border border-zinc-800 bg-zinc-900/50 text-sm">
-              <InfoRow label="ID" value={<code className="font-mono text-xs">{developer.id}</code>} />
-              <InfoRow label="Workspace" value={<code className="font-mono text-xs">{developer.workspacePath}</code>} />
-              <InfoRow label="Git Branch" value={<code className="font-mono text-xs">{developer.gitBranch}</code>} />
-              {developer.gitRepo && (
-                <InfoRow label="Git Repo" value={
-                  <a href={developer.gitRepo} target="_blank" rel="noreferrer" className="text-blue-400 hover:underline break-all">
-                    {developer.gitRepo}
-                  </a>
-                } />
-              )}
-              <InfoRow label="Last Heartbeat" value={
-                <span className="text-zinc-400">
-                  {developer.lastHeartbeat ? new Date(developer.lastHeartbeat).toLocaleString() : 'never'}
-                </span>
-              } />
-            </dl>
-          </section>
-
-          <section>
-            <div className="flex items-center justify-between mb-2">
-              <h2 className="text-sm font-semibold text-zinc-400 uppercase tracking-wide">
-                Runs ({runs.length})
-              </h2>
-              <button
-                onClick={refreshRuns}
-                className="text-xs text-zinc-500 hover:text-zinc-300"
-              >
-                Refresh
-              </button>
-            </div>
-            {runs.length === 0 ? (
-              <p className="text-sm text-zinc-600">No runs yet</p>
+        {/* State files */}
+        <div className="w-[20rem] border-r border-zinc-800 flex flex-col">
+          <div className="px-3 py-2 border-b border-zinc-800 flex items-center justify-between">
+            <span className="text-xs uppercase tracking-wider text-zinc-500">Memory</span>
+            <button onClick={refreshState} className="text-xs text-zinc-500 hover:text-zinc-300">refresh</button>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {stateFiles.length === 0 ? (
+              <p className="text-xs text-zinc-600 p-3">No memory files yet. Dev's claude memory shows up here.</p>
             ) : (
-              <div className="space-y-2">
-                {runs.map(run => (
-                  <div
-                    key={run.id}
-                    onClick={() => viewRun(run.id)}
-                    className={`w-full text-left rounded border p-3 transition-colors cursor-pointer ${
-                      activeRunId === run.id
-                        ? 'border-zinc-500 bg-zinc-900'
-                        : 'border-zinc-800 bg-zinc-900/30 hover:border-zinc-600'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-1">
-                      <div className="flex items-center gap-2">
-                        <RunStatusBadge status={run.status} />
-                        <span className="px-1.5 py-0.5 text-xs rounded bg-zinc-800 text-zinc-400">
-                          {run.mode}
-                        </span>
-                        {run.pushStatus && run.pushStatus !== 'not_attempted' && (
-                          <PushStatusBadge pushStatus={run.pushStatus} pushError={run.pushError} />
-                        )}
-                        {run.model && (
-                          <span className="px-1.5 py-0.5 text-xs rounded bg-zinc-800 text-zinc-500 font-mono">
-                            {run.model}
-                          </span>
-                        )}
-                      </div>
-                      <span className="text-xs text-zinc-500">
-                        {formatDuration(run.startedAt, run.finishedAt, now)}
-                      </span>
-                    </div>
-                    <ExpandableMarkdown source={run.instructions} />
-
-                    <div className="flex items-center gap-2 mt-1 text-xs text-zinc-500 font-mono">
-                      {run.gitShaStart && <span>{run.gitShaStart.slice(0, 7)}</span>}
-                      {run.gitShaStart && run.gitShaEnd && <span>→</span>}
-                      {run.gitShaEnd && <span>{run.gitShaEnd.slice(0, 7)}</span>}
-                      {typeof run.totalCostUsd === 'number' && (
-                        <span className="ml-auto">${run.totalCostUsd.toFixed(4)}</span>
-                      )}
-                    </div>
-                  </div>
+              <ul>
+                {stateFiles.map(f => (
+                  <li key={f.name}>
+                    <button
+                      onClick={() => setSelectedFile(f.name === selectedFile ? null : f.name)}
+                      className={`w-full text-left px-3 py-1.5 text-xs font-mono truncate ${
+                        f.name === selectedFile ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-900'
+                      }`}
+                    >{f.name}</button>
+                  </li>
                 ))}
-              </div>
+              </ul>
             )}
-          </section>
-        </div>
-
-        {/* Right: Dispatch + live logs */}
-        <div className="w-1/2 flex flex-col">
-          <form onSubmit={handleDispatch} className="border-b border-zinc-800 p-4 space-y-3">
-            <div>
-              <label className="block text-sm font-medium text-zinc-300 mb-1">Instructions</label>
-              <textarea
-                value={instructions}
-                onChange={e => setInstructions(e.target.value)}
-                placeholder="Describe the task for the developer agent..."
-                className="w-full min-h-[120px] rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500 font-mono"
-                disabled={dispatching}
-              />
-            </div>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 p-1">
-                <ModeButton
-                  active={mode === 'implement'}
-                  onClick={() => setMode('implement')}
-                  label="Implement"
-                />
-                <ModeButton
-                  active={mode === 'clarify'}
-                  onClick={() => setMode('clarify')}
-                  label="Clarify"
-                />
+          </div>
+          {selectedFileObj && (
+            <div className="border-t border-zinc-800 max-h-[50%] overflow-y-auto">
+              <div className="px-3 py-2 border-b border-zinc-800 flex items-center justify-between">
+                <span className="text-xs font-mono text-zinc-300 truncate">{selectedFileObj.name}</span>
+                <button onClick={() => setSelectedFile(null)} className="text-xs text-zinc-500 hover:text-zinc-300">×</button>
               </div>
-              <Button type="submit" disabled={dispatching || !instructions.trim()}>
-                {dispatching ? 'Dispatching...' : 'Dispatch'}
-              </Button>
+              <pre className="p-3 text-xs text-zinc-300 whitespace-pre-wrap break-words font-mono">
+                {selectedFileObj.content}
+              </pre>
             </div>
-            {dispatchError && <p className="text-sm text-red-400">{dispatchError}</p>}
-          </form>
-
-          <div className="flex-1 flex flex-col overflow-hidden">
-            <div className="px-4 py-2 border-b border-zinc-800 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-zinc-400 uppercase tracking-wide">
-                {activeRunId ? 'Run Stream' : 'Latest Run'}
-              </h2>
-              {activeRun && (
-                <div className="flex items-center gap-2">
-                  <RunStatusBadge status={activeRun.status} />
-                  <span className="text-xs text-zinc-500">
-                    {logs.length} event{logs.length === 1 ? '' : 's'}
-                  </span>
-                </div>
-              )}
-            </div>
-
-            <div ref={logScrollRef} className="flex-1 overflow-y-auto p-4 space-y-2">
-              {!activeRunId && (
-                <p className="text-sm text-zinc-600 text-center py-10">
-                  Dispatch a task or select a run to view its log stream
-                </p>
-              )}
-              {activeRunId && logs.length === 0 && (
-                <p className="text-sm text-zinc-600">Waiting for events...</p>
-              )}
-              {logs.map(log => (
-                <LogEntry key={log.id} log={log} />
-              ))}
-              {activeRun && TERMINAL_STATUSES.has(activeRun.status) && (
-                <RunSummary run={activeRun} developer={developer} />
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="flex border-b border-zinc-800 last:border-b-0 px-3 py-2">
-      <dt className="w-32 text-zinc-500 shrink-0">{label}</dt>
-      <dd className="flex-1 min-w-0 text-zinc-200 break-all">{value}</dd>
-    </div>
-  )
-}
-
-function ModeButton({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
-        active ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'
-      }`}
-    >
-      {label}
-    </button>
-  )
-}
-
-function OnlineDot({ online }: { online: boolean }) {
-  return (
-    <span
-      className={`inline-block w-2 h-2 rounded-full shrink-0 ${online ? 'bg-green-500' : 'bg-zinc-600'}`}
-    />
-  )
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const colors: Record<string, string> = {
-    idle: 'bg-green-600',
-    busy: 'bg-yellow-600',
-    error: 'bg-red-600',
-    offline: 'bg-zinc-600',
-  }
-  return (
-    <span className={`px-2 py-0.5 text-xs font-medium text-white rounded ${colors[status] || 'bg-zinc-600'}`}>
-      {status}
-    </span>
-  )
-}
-
-function RunStatusBadge({ status }: { status: string }) {
-  const colors: Record<string, string> = {
-    pending: 'bg-zinc-600',
-    running: 'bg-yellow-600',
-    success: 'bg-green-600',
-    failure: 'bg-red-600',
-    cancelled: 'bg-zinc-600',
-    no_changes: 'bg-blue-600',
-  }
-  return (
-    <span className={`px-1.5 py-0.5 text-xs font-medium text-white rounded ${colors[status] || 'bg-zinc-600'}`}>
-      {status}
-    </span>
-  )
-}
-
-// Markdown renderer that collapses long content behind a Show full / Show less
-// toggle. Used for dispatch task descriptions and run-stream assistant/user
-// messages. Keeps cards scannable while letting the user see full payload on
-// demand.
-function ExpandableMarkdown({
-  source,
-  maxChars = 280,
-  className = 'text-sm text-zinc-300 prose prose-sm prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 prose-pre:bg-zinc-800 prose-pre:border prose-pre:border-zinc-700 prose-code:text-emerald-400 prose-strong:text-zinc-100',
-}: {
-  source: string
-  maxChars?: number
-  className?: string
-}) {
-  const [expanded, setExpanded] = useState(false)
-  const isLong = source.length > maxChars || source.split('\n').length > 4
-  if (!isLong) {
-    return (
-      <div className={className}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{source}</ReactMarkdown>
-      </div>
-    )
-  }
-  return (
-    <div>
-      <div
-        className={`${className} ${expanded ? '' : 'relative max-h-24 overflow-hidden'}`}
-      >
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{source}</ReactMarkdown>
-        {!expanded && (
-          <div className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-zinc-900 to-transparent pointer-events-none" />
-        )}
-      </div>
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation()
-          setExpanded((v) => !v)
-        }}
-        className="mt-1 text-[11px] text-zinc-400 hover:text-zinc-200 underline-offset-2 hover:underline"
-      >
-        {expanded ? 'Show less' : 'Show full'}
-      </button>
-    </div>
-  )
-}
-
-function PushStatusBadge({
-  pushStatus,
-  pushError,
-}: {
-  pushStatus: 'pushed' | 'failed' | 'not_attempted'
-  pushError: string | null
-}) {
-  if (pushStatus === 'pushed') {
-    return (
-      <span className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-green-950/60 text-green-400 border border-green-900/60">
-        pushed
-      </span>
-    )
-  }
-  if (pushStatus === 'failed') {
-    return (
-      <span
-        className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-red-950/60 text-red-400 border border-red-900/60"
-        title={pushError || 'push failed'}
-      >
-        push failed
-      </span>
-    )
-  }
-  return null
-}
-
-const EVENT_ICONS: Record<string, string> = {
-  assistant: '>',
-  user: '<',
-  system: '!',
-  progress: '·',
-  result: 'o',
-  raw: '-',
-  stderr: 'e',
-  'queue-operation': '~',
-  'file-history-snapshot': '#',
-  'last-prompt': 'p',
-  'ai-title': 't',
-  attachment: '@',
-}
-
-const EVENT_COLORS: Record<string, string> = {
-  assistant: 'text-blue-400',
-  user: 'text-cyan-400',
-  system: 'text-amber-400',
-  progress: 'text-zinc-500',
-  result: 'text-green-400',
-  raw: 'text-zinc-400',
-  stderr: 'text-red-400',
-  'queue-operation': 'text-zinc-600',
-  'file-history-snapshot': 'text-zinc-500',
-  'last-prompt': 'text-zinc-400',
-  'ai-title': 'text-zinc-400',
-  attachment: 'text-zinc-400',
-}
-
-function LogEntry({ log }: { log: DeveloperLog }) {
-  const icon = EVENT_ICONS[log.eventType] || '-'
-  const color = EVENT_COLORS[log.eventType] || 'text-zinc-400'
-  return (
-    <div className="flex gap-2 text-sm font-mono leading-relaxed">
-      <span className={`${color} shrink-0 w-4 text-center`}>{icon}</span>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 text-xs text-zinc-500">
-          <span>{log.eventType}</span>
-          <span>{new Date(log.timestamp).toLocaleTimeString()}</span>
-        </div>
-        <LogBody log={log} color={color} />
-      </div>
-    </div>
-  )
-}
-
-const STREAM_PROSE_CLASS =
-  'text-zinc-300 prose prose-sm prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 prose-pre:bg-zinc-800 prose-pre:border prose-pre:border-zinc-700 prose-code:text-emerald-400 prose-strong:text-zinc-100'
-
-function LogBody({ log, color }: { log: DeveloperLog; color: string }) {
-  // Claude conversation events (assistant + user) carry markdown; render each
-  // content block appropriately so prose reads nicely and tool_use JSON stays
-  // in a monospace box.
-  if (log.eventType === 'assistant') {
-    return <AssistantBlocks data={(log.data as Record<string, unknown>) || {}} />
-  }
-  if (log.eventType === 'user') {
-    return <UserBlocks data={(log.data as Record<string, unknown>) || {}} />
-  }
-  const text = extractLogText(log)
-  if (!text) return null
-  return (
-    <pre className={`whitespace-pre-wrap break-words text-sm ${color}`}>
-      {text}
-    </pre>
-  )
-}
-
-function AssistantBlocks({ data }: { data: Record<string, unknown> }) {
-  const msg = (data.message as { content?: unknown } | undefined) || {}
-  const content = msg.content
-  if (!Array.isArray(content)) {
-    const fallback = fallbackText(data)
-    return fallback ? (
-      <pre className="whitespace-pre-wrap break-words text-sm text-blue-400">{fallback}</pre>
-    ) : null
-  }
-  const nodes: React.ReactNode[] = []
-  content.forEach((block, i) => {
-    if (!block || typeof block !== 'object') return
-    const b = block as Record<string, unknown>
-    if (b.type === 'text' && typeof b.text === 'string' && b.text) {
-      nodes.push(
-        <div key={i} className={STREAM_PROSE_CLASS}>
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{b.text}</ReactMarkdown>
-        </div>
-      )
-    } else if (b.type === 'thinking' && typeof b.thinking === 'string') {
-      nodes.push(
-        <div
-          key={i}
-          className="text-xs italic text-zinc-500 whitespace-pre-wrap break-words"
-        >
-          [thinking] {b.thinking}
-        </div>
-      )
-    } else if (b.type === 'tool_use') {
-      const name = typeof b.name === 'string' ? b.name : 'tool'
-      const input =
-        b.input && typeof b.input === 'object'
-          ? JSON.stringify(b.input, null, 2)
-          : ''
-      nodes.push(
-        <pre
-          key={i}
-          className="whitespace-pre-wrap break-words text-xs text-blue-300 bg-zinc-900/60 border border-zinc-800 rounded px-2 py-1 font-mono"
-        >
-          {input ? `${name}(\n${input}\n)` : `${name}()`}
-        </pre>
-      )
-    }
-  })
-  return nodes.length > 0 ? <div className="space-y-1">{nodes}</div> : null
-}
-
-function UserBlocks({ data }: { data: Record<string, unknown> }) {
-  const msg = (data.message as { content?: unknown } | undefined) || {}
-  const content = msg.content
-  if (typeof content === 'string') {
-    return (
-      <div className={STREAM_PROSE_CLASS}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
-      </div>
-    )
-  }
-  if (!Array.isArray(content)) {
-    const fallback = fallbackText(data)
-    return fallback ? (
-      <pre className="whitespace-pre-wrap break-words text-sm text-cyan-400">{fallback}</pre>
-    ) : null
-  }
-  const nodes: React.ReactNode[] = []
-  content.forEach((block, i) => {
-    if (!block || typeof block !== 'object') return
-    const b = block as Record<string, unknown>
-    if (b.type === 'text' && typeof b.text === 'string' && b.text) {
-      nodes.push(
-        <div key={i} className={STREAM_PROSE_CLASS}>
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{b.text}</ReactMarkdown>
-        </div>
-      )
-    } else if (b.type === 'tool_result') {
-      const c = b.content
-      const isErr = b.is_error === true
-      let inner = ''
-      if (typeof c === 'string') {
-        inner = c
-      } else if (Array.isArray(c)) {
-        inner = c
-          .map((x) => {
-            if (x && typeof x === 'object') {
-              const xb = x as Record<string, unknown>
-              if (typeof xb.text === 'string') return xb.text
-            }
-            return ''
-          })
-          .filter(Boolean)
-          .join('\n')
-      }
-      if (!inner) return
-      if (isErr) {
-        nodes.push(
-          <pre
-            key={i}
-            className="whitespace-pre-wrap break-words text-sm text-red-400"
-          >
-            {inner}
-          </pre>
-        )
-      } else {
-        nodes.push(
-          <div key={i} className={STREAM_PROSE_CLASS}>
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{inner}</ReactMarkdown>
-          </div>
-        )
-      }
-    }
-  })
-  return nodes.length > 0 ? <div className="space-y-1">{nodes}</div> : null
-}
-
-function extractLogText(log: DeveloperLog): string {
-  const d = (log.data as Record<string, unknown>) || {}
-  switch (log.eventType) {
-    case 'assistant':
-      return formatAssistantEvent(d)
-    case 'user':
-      return formatUserEvent(d)
-    case 'system':
-      return formatSystemEvent(d)
-    case 'progress':
-      return formatProgressEvent(d)
-    case 'result':
-      return formatResultEvent(d)
-    case 'queue-operation':
-      return typeof d.operation === 'string' ? d.operation : fallbackText(d)
-    case 'file-history-snapshot':
-      return formatFileHistoryEvent(d)
-    case 'last-prompt':
-      return typeof d.lastPrompt === 'string' ? d.lastPrompt : fallbackText(d)
-    case 'ai-title':
-      return typeof d.aiTitle === 'string' ? d.aiTitle : fallbackText(d)
-    case 'attachment':
-      return formatAttachmentEvent(d)
-    case 'raw':
-    case 'stderr':
-      return typeof d.text === 'string' ? d.text : fallbackText(d)
-    default:
-      return fallbackText(d)
-  }
-}
-
-function formatAssistantEvent(d: Record<string, unknown>): string {
-  const msg = (d.message as { content?: unknown } | undefined) || {}
-  const content = msg.content
-  if (!Array.isArray(content)) return fallbackText(d)
-  const parts: string[] = []
-  for (const block of content) {
-    if (!block || typeof block !== 'object') continue
-    const b = block as Record<string, unknown>
-    if (b.type === 'text' && typeof b.text === 'string') {
-      parts.push(b.text)
-    } else if (b.type === 'thinking' && typeof b.thinking === 'string') {
-      parts.push(`[thinking] ${b.thinking}`)
-    } else if (b.type === 'tool_use') {
-      const name = typeof b.name === 'string' ? b.name : 'tool'
-      const input =
-        b.input && typeof b.input === 'object'
-          ? JSON.stringify(b.input, null, 2)
-          : ''
-      parts.push(input ? `${name}(\n${input}\n)` : `${name}()`)
-    }
-  }
-  return parts.length > 0 ? parts.join('\n\n') : fallbackText(d)
-}
-
-function formatUserEvent(d: Record<string, unknown>): string {
-  const msg = (d.message as { content?: unknown } | undefined) || {}
-  const content = msg.content
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return fallbackText(d)
-  const parts: string[] = []
-  for (const block of content) {
-    if (!block || typeof block !== 'object') continue
-    const b = block as Record<string, unknown>
-    if (b.type === 'text' && typeof b.text === 'string') {
-      parts.push(b.text)
-    } else if (b.type === 'tool_result') {
-      const c = b.content
-      const err = b.is_error ? '[error] ' : ''
-      if (typeof c === 'string') {
-        parts.push(`${err}${c}`)
-      } else if (Array.isArray(c)) {
-        const inner = c
-          .map((x) => {
-            if (x && typeof x === 'object') {
-              const xb = x as Record<string, unknown>
-              if (typeof xb.text === 'string') return xb.text
-            }
-            return ''
-          })
-          .filter(Boolean)
-          .join('\n')
-        if (inner) parts.push(`${err}${inner}`)
-      }
-    }
-  }
-  return parts.length > 0 ? parts.join('\n\n') : fallbackText(d)
-}
-
-function formatSystemEvent(d: Record<string, unknown>): string {
-  const subtype = typeof d.subtype === 'string' ? d.subtype : 'system'
-  if (subtype === 'init') {
-    const bits: string[] = [`[${subtype}]`]
-    if (Array.isArray(d.tools)) bits.push(`tools=${d.tools.length}`)
-    if (typeof d.cwd === 'string') bits.push(`cwd=${d.cwd}`)
-    if (typeof d.model === 'string') bits.push(`model=${d.model}`)
-    if (typeof d.session_id === 'string') bits.push(`session=${d.session_id}`)
-    return bits.join(' ')
-  }
-  if (subtype === 'api_error') {
-    const err = d.error as Record<string, unknown> | undefined
-    const inner = err && (err.error as Record<string, unknown> | undefined)
-    const innerErr = inner && (inner.error as Record<string, unknown> | undefined)
-    const message =
-      (innerErr && typeof innerErr.message === 'string' && innerErr.message) ||
-      (inner && typeof inner.message === 'string' && inner.message) ||
-      ''
-    const attempt =
-      d.retryAttempt != null
-        ? ` (retry ${d.retryAttempt}/${d.maxRetries ?? '?'})`
-        : ''
-    return `[${subtype}] ${message}${attempt}`
-  }
-  return `[${subtype}] ${fallbackText(d)}`
-}
-
-function formatProgressEvent(d: Record<string, unknown>): string {
-  const inner = (d.data as Record<string, unknown> | undefined) || {}
-  const innerType = typeof inner.type === 'string' ? inner.type : 'progress'
-  const hook = typeof inner.hookName === 'string' ? inner.hookName : ''
-  return hook ? `${innerType} ${hook}` : innerType
-}
-
-function formatResultEvent(d: Record<string, unknown>): string {
-  if (typeof d.result === 'string') return d.result
-  if (typeof d.stop_reason === 'string') return `stop_reason=${d.stop_reason}`
-  return fallbackText(d)
-}
-
-function formatFileHistoryEvent(d: Record<string, unknown>): string {
-  const snap = (d.snapshot as Record<string, unknown> | undefined) || {}
-  const backups = snap.trackedFileBackups
-  const tracked =
-    backups && typeof backups === 'object'
-      ? Object.keys(backups as Record<string, unknown>).length
-      : 0
-  const update = d.isSnapshotUpdate ? ' (update)' : ''
-  return `snapshot: ${tracked} tracked file${tracked === 1 ? '' : 's'}${update}`
-}
-
-function formatAttachmentEvent(d: Record<string, unknown>): string {
-  const att = (d.attachment as Record<string, unknown> | undefined) || {}
-  const t = typeof att.type === 'string' ? att.type : 'attachment'
-  if (t === 'deferred_tools_delta') {
-    const added = Array.isArray(att.addedNames) ? att.addedNames.length : 0
-    const removed = Array.isArray(att.removedNames) ? att.removedNames.length : 0
-    return `deferred_tools_delta: +${added} -${removed}`
-  }
-  return t
-}
-
-function fallbackText(d: Record<string, unknown>): string {
-  if (!d) return ''
-  if (typeof d.text === 'string') return d.text
-  if (typeof d.message === 'string') return d.message
-  try {
-    return JSON.stringify(d, null, 2)
-  } catch {
-    return ''
-  }
-}
-
-function RunSummary({ run, developer }: { run: DeveloperRun; developer: Developer }) {
-  const diffUrl = run.gitShaStart && run.gitShaEnd && developer.gitRepo
-    ? buildDiffUrl(developer.gitRepo, run.gitShaStart, run.gitShaEnd)
-    : null
-  return (
-    <div className="mt-4 p-3 rounded border border-zinc-700 bg-zinc-900">
-      <div className="flex items-center gap-2 mb-2 flex-wrap">
-        <RunStatusBadge status={run.status} />
-        {run.pushStatus && run.pushStatus !== 'not_attempted' && (
-          <PushStatusBadge pushStatus={run.pushStatus} pushError={run.pushError} />
-        )}
-        <span className="text-xs text-zinc-500">
-          {formatDuration(run.startedAt, run.finishedAt)}
-        </span>
-        {run.provider && (
-          <span className="text-xs font-mono text-zinc-500">{run.provider}</span>
-        )}
-        {run.model && (
-          <span className="text-xs font-mono text-zinc-500">{run.model}</span>
-        )}
-        {typeof run.totalCostUsd === 'number' && (
-          <span className="text-xs font-mono text-zinc-500">${run.totalCostUsd.toFixed(4)}</span>
-        )}
-        {run.stopReason && (
-          <span className="text-xs font-mono text-zinc-500">stop={run.stopReason}</span>
-        )}
-      </div>
-      {run.pushStatus === 'failed' && run.pushError && (
-        <div className="mb-2 rounded border border-red-900/60 bg-red-950/30 px-2 py-1.5">
-          <div className="text-[10px] uppercase tracking-wide text-red-400 mb-0.5">
-            push failed (work completed)
-          </div>
-          <pre className="text-red-300 whitespace-pre-wrap break-words font-mono text-[11px]">
-            {run.pushError}
-          </pre>
-        </div>
-      )}
-      {run.response && (
-        <div className="mb-2">
-          <ExpandableMarkdown source={run.response} maxChars={400} />
-        </div>
-      )}
-      {run.errorMessage && (
-        <pre className="text-sm text-red-400 whitespace-pre-wrap font-mono mb-2">
-          {run.errorMessage}
-        </pre>
-      )}
-      {(run.gitShaStart || run.gitShaEnd) && (
-        <div className="flex items-center gap-2 text-xs font-mono text-zinc-500 mb-2">
-          {run.gitShaStart && <span>{run.gitShaStart.slice(0, 7)}</span>}
-          {run.gitShaStart && run.gitShaEnd && <span>→</span>}
-          {run.gitShaEnd && <span>{run.gitShaEnd.slice(0, 7)}</span>}
-          {diffUrl && (
-            <a href={diffUrl} target="_blank" rel="noreferrer" className="text-blue-400 hover:underline ml-2">
-              View diff
-            </a>
           )}
         </div>
-      )}
-      {run.trailer && (
-        <details>
-          <summary className="text-[10px] text-zinc-500 cursor-pointer hover:text-zinc-300">
-            Full trailer
-          </summary>
-          <pre className="mt-1 text-[11px] text-zinc-500 whitespace-pre-wrap break-words font-mono">
-            {JSON.stringify(run.trailer, null, 2)}
-          </pre>
-        </details>
-      )}
+
+        {/* List panel */}
+        <div className="w-[22rem] border-r border-zinc-800 flex flex-col">
+          <div className="px-3 py-2 border-b border-zinc-800 flex items-center gap-1">
+            <button
+              onClick={() => setListTab('chats')}
+              className={`text-xs px-2 py-1 rounded ${listTab === 'chats' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'}`}
+            >Chats ({chats.length})</button>
+            <button
+              onClick={() => setListTab('runs')}
+              className={`text-xs px-2 py-1 rounded ${listTab === 'runs' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'}`}
+            >Runs ({standaloneRuns.length})</button>
+            <div className="ml-auto flex items-center gap-1">
+              {listTab === 'chats' && (
+                <button
+                  onClick={handleNewChat}
+                  className="text-xs px-2 py-1 rounded bg-violet-900 hover:bg-violet-800 text-violet-100"
+                >+ New</button>
+              )}
+              <button
+                onClick={listTab === 'chats' ? refreshChats : refreshRuns}
+                className="text-xs text-zinc-500 hover:text-zinc-300"
+              >↻</button>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto">
+            {listTab === 'chats' ? (
+              chats.length === 0 ? (
+                <p className="text-xs text-zinc-600 p-3">No chats yet. Start a new one or promote a run.</p>
+              ) : (
+                <ul>
+                  {chats.map(c => (
+                    <li key={c.id}>
+                      <button
+                        onClick={() => selectChat(c)}
+                        className={`w-full text-left px-3 py-2 border-b border-zinc-900 ${
+                          selection?.kind === 'chat' && selection.id === c.id ? 'bg-zinc-800' : 'hover:bg-zinc-900'
+                        }`}
+                      >
+                        <div className="text-xs text-zinc-200 line-clamp-1 mb-1">{c.title || '(untitled)'}</div>
+                        <div className="flex items-center gap-2 text-[10px] text-zinc-500 font-mono">
+                          <span>{relTime(c.lastMessageAt ?? c.createdAt)}</span>
+                          {c.claudeSessionId && <span title={c.claudeSessionId}>session {c.claudeSessionId.slice(0, 8)}</span>}
+                        </div>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )
+            ) : (
+              standaloneRuns.length === 0 ? (
+                <p className="text-xs text-zinc-600 p-3">No standalone runs yet.</p>
+              ) : (
+                <ul>
+                  {standaloneRuns.map(r => (
+                    <li key={r.id}>
+                      <button
+                        onClick={() => selectRun(r)}
+                        className={`w-full text-left px-3 py-2 border-b border-zinc-900 ${
+                          selection?.kind === 'run' && selection.id === r.id ? 'bg-zinc-800' : 'hover:bg-zinc-900'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 mb-1">
+                          <StatusBadge status={r.status} />
+                          <span className="text-xs uppercase tracking-wider text-zinc-500">{r.mode}</span>
+                          <span className="text-xs text-zinc-600 ml-auto">{relTime(r.createdAt)}</span>
+                        </div>
+                        <p className="text-xs text-zinc-300 line-clamp-2 mb-1">{r.instructions || '(empty)'}</p>
+                        <div className="flex items-center gap-3 text-[10px] text-zinc-500 font-mono">
+                          <span>{liveDuration(r, now) ?? '—'}</span>
+                          <span>{r.totalCostUsd != null ? `$${r.totalCostUsd.toFixed(4)}` : '—'}</span>
+                          {tokensSummary(r) && <span className="text-zinc-600">{tokensSummary(r)}</span>}
+                        </div>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )
+            )}
+          </div>
+        </div>
+
+        {/* Detail panel */}
+        <div className="flex-1 flex flex-col">
+          {selection?.kind === 'chat' && activeChat ? (
+            <ChatThread
+              chat={activeChat}
+              messages={chatMessages}
+              now={now}
+              onDelete={() => handleDeleteChat(activeChat.id)}
+              onRenameTitle={async (title) => {
+                await developersApi.updateChatTitle(id, activeChat.id, title)
+                refreshChats()
+                setActiveChat({ ...activeChat, title })
+              }}
+              detailScrollRef={detailScrollRef}
+            />
+          ) : selection?.kind === 'run' && activeRun ? (
+            <ActiveRunView
+              run={activeRun}
+              logs={logs}
+              expandedLogIds={expandedLogIds}
+              onToggleExpand={toggleExpandedLog}
+              onCancel={() => handleCancel(activeRun.id)}
+              onApprove={() => handleApprove(activeRun.id)}
+              onRetry={(withContext) => handleRetry(activeRun.id, withContext)}
+              onPromoteToChat={() => handlePromoteToChat(activeRun.id)}
+              detailScrollRef={detailScrollRef}
+              now={now}
+            />
+          ) : (
+            <div className="flex-1 flex items-center justify-center text-zinc-600 text-sm text-center px-6">
+              <div>
+                <p>Pick a chat or run, start a new chat, or dispatch a one-off below.</p>
+                <p className="text-xs text-zinc-700 mt-2">Chats keep claude session warm across messages — no commit per turn.</p>
+              </div>
+            </div>
+          )}
+
+          <form onSubmit={submitDispatch} className="border-t border-zinc-800 p-3 space-y-2">
+            <div className="flex items-center gap-2">
+              {selection?.kind === 'chat' ? (
+                <span className="text-xs uppercase tracking-wider text-violet-400">chat</span>
+              ) : (
+                <>
+                  <span className="text-xs uppercase tracking-wider text-zinc-500">mode</span>
+                  <select
+                    value={mode}
+                    onChange={e => setMode(e.target.value as DeveloperRunMode)}
+                    className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm"
+                  >
+                    {MODES.map(m => (
+                      <option key={m.value} value={m.value}>{m.label}</option>
+                    ))}
+                  </select>
+                  <span className="text-xs text-zinc-500">{MODES.find(m => m.value === mode)?.hint}</span>
+                </>
+              )}
+              {selection?.kind === 'chat' && (
+                <span className="text-xs text-zinc-500 ml-auto">
+                  {activeChat?.claudeSessionId ? `Resumes session ${activeChat.claudeSessionId.slice(0, 8)}` : 'New session — first message creates it'}
+                </span>
+              )}
+            </div>
+            <textarea
+              value={instructions}
+              onChange={e => setInstructions(e.target.value)}
+              placeholder={
+                selection?.kind === 'chat' ? 'Send a message...' :
+                mode === 'implement' ? 'Describe what to build/change. Include STOP criteria + Out of scope + Commit contract + Read-before-write.' :
+                mode === 'clarify' ? 'What needs clarifying? Dev will read code and ask, not edit.' :
+                'Multi-turn message. Pick "Chat" mode to use it as a fresh chat.'
+              }
+              disabled={dispatching}
+              rows={4}
+              className="w-full bg-zinc-900 border border-zinc-700 rounded px-3 py-2 text-sm font-mono resize-none"
+              onKeyDown={e => {
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                  submitDispatch(e as unknown as React.FormEvent)
+                }
+              }}
+            />
+            {dispatchError && <p className="text-xs text-red-400">{dispatchError}</p>}
+            <div className="flex items-center gap-2">
+              <Button
+                type="submit"
+                disabled={dispatching || !instructions.trim() || !developer.online}
+                size="sm"
+              >
+                {dispatching ? 'Sending...' : !developer.online ? 'Developer offline' : selection?.kind === 'chat' ? 'Send' : 'Dispatch'}
+              </Button>
+              <span className="text-xs text-zinc-600">Ctrl+Enter</span>
+            </div>
+          </form>
+        </div>
+      </div>
     </div>
   )
 }
 
-function buildDiffUrl(gitRepo: string, start: string, end: string): string | null {
-  // Convert SSH/HTTPS git URLs to github-style compare URLs when possible
-  let base = gitRepo.trim().replace(/\.git$/, '')
-  if (base.startsWith('git@github.com:')) {
-    base = 'https://github.com/' + base.slice('git@github.com:'.length)
+// ---------------------------------------------------------------------------
+// Chat thread
+// ---------------------------------------------------------------------------
+
+function ChatThread({
+  chat, messages, now, onDelete, onRenameTitle, detailScrollRef,
+}: {
+  chat: DeveloperChat
+  messages: DeveloperRun[]
+  now: number
+  onDelete: () => void
+  onRenameTitle: (title: string) => Promise<void>
+  detailScrollRef: React.RefObject<HTMLDivElement | null>
+}) {
+  const [editing, setEditing] = useState(false)
+  const [titleDraft, setTitleDraft] = useState(chat.title || '')
+  useEffect(() => { setTitleDraft(chat.title || '') }, [chat.title])
+
+  const totalCost = messages.reduce((s, m) => s + (m.totalCostUsd ?? 0), 0)
+
+  return (
+    <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="px-4 py-3 border-b border-zinc-800 flex items-center gap-3">
+        {editing ? (
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault()
+              await onRenameTitle(titleDraft.trim() || 'Chat')
+              setEditing(false)
+            }}
+            className="flex-1 flex items-center gap-2"
+          >
+            <input
+              value={titleDraft}
+              onChange={e => setTitleDraft(e.target.value)}
+              autoFocus
+              className="flex-1 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm"
+            />
+            <Button type="submit" size="sm">Save</Button>
+            <Button type="button" size="sm" variant="outline" onClick={() => setEditing(false)}>Cancel</Button>
+          </form>
+        ) : (
+          <>
+            <h2 className="text-sm font-semibold text-zinc-200 flex-1 truncate">{chat.title || '(untitled chat)'}</h2>
+            <button onClick={() => setEditing(true)} className="text-xs text-zinc-500 hover:text-zinc-300">rename</button>
+            <button onClick={onDelete} className="text-xs text-red-500 hover:text-red-300">delete</button>
+          </>
+        )}
+      </div>
+
+      <div className="px-4 py-2 border-b border-zinc-900 flex items-center gap-4 text-xs text-zinc-500">
+        <span>{messages.length} message{messages.length === 1 ? '' : 's'}</span>
+        {totalCost > 0 && <span>total cost ${totalCost.toFixed(4)}</span>}
+        {chat.claudeSessionId && (
+          <span className="font-mono ml-auto" title={chat.claudeSessionId}>session {chat.claudeSessionId.slice(0, 8)}</span>
+        )}
+      </div>
+
+      <div ref={detailScrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
+        {messages.length === 0 && (
+          <p className="text-center text-zinc-600 text-sm py-12">No messages yet. Send one below.</p>
+        )}
+        {messages.map(m => (
+          <ChatMessage key={m.id} message={m} now={now} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function ChatMessage({ message, now }: { message: DeveloperRun; now: number }) {
+  return (
+    <div className="space-y-1">
+      <div className="flex">
+        <div className="ml-auto max-w-[70%] bg-zinc-800 rounded-lg px-3 py-2">
+          <pre className="text-sm text-zinc-100 whitespace-pre-wrap font-sans">{message.instructions}</pre>
+        </div>
+      </div>
+      <div className="flex">
+        <div className="mr-auto max-w-[85%] rounded-lg px-3 py-2 bg-zinc-900 border border-zinc-800">
+          <div className="flex items-center gap-2 mb-1 text-[10px] text-zinc-500 flex-wrap">
+            <StatusBadge status={message.status} />
+            <span>{liveDuration(message, now) ?? '...'}</span>
+            {message.totalCostUsd != null && <span>${message.totalCostUsd.toFixed(4)}</span>}
+            {tokensSummary(message) && <span className="text-zinc-600">{tokensSummary(message)}</span>}
+            {cacheSummary(message) && <span className="text-zinc-600">{cacheSummary(message)}</span>}
+            {message.stopReason && <span className="text-zinc-600">{message.stopReason}</span>}
+          </div>
+          {message.status === 'running' && !message.response ? (
+            <p className="text-sm text-zinc-500 italic">thinking...</p>
+          ) : message.errorMessage ? (
+            <pre className="text-sm text-red-300 whitespace-pre-wrap font-mono">{message.errorMessage}</pre>
+          ) : (
+            <div className="prose prose-invert prose-sm max-w-none">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.response || ''}</ReactMarkdown>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Run detail
+// ---------------------------------------------------------------------------
+
+function ActiveRunView({
+  run, logs, expandedLogIds, onToggleExpand, onCancel, onApprove, onRetry, onPromoteToChat, detailScrollRef, now,
+}: {
+  run: DeveloperRun
+  logs: DeveloperLog[]
+  expandedLogIds: Set<string>
+  onToggleExpand: (logId: string) => void
+  onCancel: () => void
+  onApprove: () => void
+  onRetry: (withContext: boolean) => void
+  onPromoteToChat: () => void
+  detailScrollRef: React.RefObject<HTMLDivElement | null>
+  now: number
+}) {
+  const isTerminal = TERMINAL_STATUSES.has(run.status)
+  const [showAllLogs, setShowAllLogs] = useState(false)
+  const visibleLogs = !isTerminal || showAllLogs ? logs : logs.slice(-10)
+  const hiddenCount = logs.length - visibleLogs.length
+  const usage = (run.trailer?.usage ?? {}) as Record<string, number | undefined>
+  const tokensIn = usage.input_tokens
+  const tokensOut = usage.output_tokens
+  const cacheRead = usage.cache_read_input_tokens
+  const cacheWrite = usage.cache_creation_input_tokens
+  const canPromote = run.status === 'success' && !!run.sessionId && !run.chatId
+
+  return (
+    <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="px-4 py-3 border-b border-zinc-800 space-y-2">
+        <div className="flex items-center gap-3 flex-wrap">
+          <StatusBadge status={run.status} />
+          <span className="text-xs uppercase tracking-wider text-zinc-500">{run.mode}</span>
+          <span className="text-xs text-zinc-600 font-mono">{run.id.slice(0, 8)}</span>
+          <span className="text-xs text-zinc-600">{relTime(run.createdAt)}</span>
+          {run.parentRunId && (
+            <span className="text-xs text-amber-400">retry of {run.parentRunId.slice(0, 8)}</span>
+          )}
+          {run.pushStatus === 'pushed' && <span className="text-xs text-green-400">pushed</span>}
+          {run.pushStatus === 'failed' && <span className="text-xs text-red-400" title={run.pushError ?? ''}>push failed</span>}
+          <div className="ml-auto flex items-center gap-2">
+            {canPromote && (
+              <Button onClick={onPromoteToChat} size="sm" variant="outline">Continue as chat</Button>
+            )}
+            {run.status === 'pending' && <Button onClick={onApprove} size="sm">Approve</Button>}
+            {(run.status === 'pending' || run.status === 'queued') && (
+              <Button onClick={onCancel} size="sm" variant="outline">Cancel</Button>
+            )}
+            {run.status === 'failure' && (
+              <>
+                <Button onClick={() => onRetry(false)} size="sm" variant="outline">Retry</Button>
+                <Button onClick={() => onRetry(true)} size="sm" variant="outline">Continue</Button>
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-1 text-xs">
+          <Meta label="model" value={run.model} />
+          <Meta label="cost" value={run.totalCostUsd != null ? `$${run.totalCostUsd.toFixed(4)}` : null} />
+          <Meta label="duration" value={liveDuration(run, now)} />
+          <Meta label="api time" value={formatDuration(run.durationApiMs)} />
+          <Meta label="tokens in" value={tokensIn != null ? tokensIn.toLocaleString() : null} />
+          <Meta label="tokens out" value={tokensOut != null ? tokensOut.toLocaleString() : null} />
+          <Meta label="cache read" value={cacheRead ? cacheRead.toLocaleString() : null} />
+          <Meta label="cache write" value={cacheWrite ? cacheWrite.toLocaleString() : null} />
+          <Meta label="stop" value={run.stopReason} />
+          <Meta label="session" value={run.sessionId ? run.sessionId.slice(0, 8) : null} />
+          <Meta label="git start" value={run.gitShaStart ? run.gitShaStart.slice(0, 7) : null} />
+          <Meta label="git end" value={run.gitShaEnd ? run.gitShaEnd.slice(0, 7) : null} />
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto" ref={detailScrollRef}>
+        <Section title="Instructions">
+          <pre className="text-sm text-zinc-300 whitespace-pre-wrap font-mono">{run.instructions || '(empty)'}</pre>
+        </Section>
+        {run.errorMessage && (
+          <Section title="Error" tone="error">
+            <pre className="text-sm text-red-300 whitespace-pre-wrap font-mono">{run.errorMessage}</pre>
+          </Section>
+        )}
+        {run.pushError && (
+          <Section title="Push error" tone="error">
+            <pre className="text-sm text-red-300 whitespace-pre-wrap font-mono">{run.pushError}</pre>
+          </Section>
+        )}
+        {run.response && (
+          <Section title="Response">
+            <div className="prose prose-invert prose-sm max-w-none">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{run.response}</ReactMarkdown>
+            </div>
+          </Section>
+        )}
+        {run.resumeContext && (
+          <Section title="Resume context">
+            <pre className="text-xs text-zinc-400 whitespace-pre-wrap font-mono">{run.resumeContext}</pre>
+          </Section>
+        )}
+        <Section title={`Events (${logs.length})`}>
+          {logs.length === 0 ? (
+            <p className="text-xs text-zinc-600">No events yet.</p>
+          ) : (
+            <>
+              {hiddenCount > 0 && (
+                <button
+                  onClick={() => setShowAllLogs(true)}
+                  className="text-xs text-zinc-500 hover:text-zinc-300 mb-2"
+                >▸ show {hiddenCount} earlier event{hiddenCount === 1 ? '' : 's'}</button>
+              )}
+              {showAllLogs && isTerminal && logs.length > 10 && (
+                <button
+                  onClick={() => setShowAllLogs(false)}
+                  className="text-xs text-zinc-500 hover:text-zinc-300 mb-2"
+                >▾ collapse to last 10</button>
+              )}
+              <ul className="space-y-1">
+                {visibleLogs.map(log => (
+                  <LogItem
+                    key={log.id}
+                    log={log}
+                    expanded={expandedLogIds.has(log.id)}
+                    onToggle={() => onToggleExpand(log.id)}
+                  />
+                ))}
+              </ul>
+            </>
+          )}
+        </Section>
+        {run.trailer && Object.keys(run.trailer).length > 0 && (
+          <Section title="Trailer">
+            <pre className="text-xs text-zinc-400 whitespace-pre-wrap font-mono">{JSON.stringify(run.trailer, null, 2)}</pre>
+          </Section>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Pieces (mirrors oracle page)
+// ---------------------------------------------------------------------------
+
+function StatusBadge({ status }: { status: DeveloperRun['status'] }) {
+  const styles: Record<DeveloperRun['status'], string> = {
+    pending: 'bg-amber-900 text-amber-200',
+    queued: 'bg-blue-900 text-blue-200',
+    running: 'bg-violet-900 text-violet-200 animate-pulse',
+    success: 'bg-green-900 text-green-200',
+    failure: 'bg-red-900 text-red-200',
+    cancelled: 'bg-zinc-800 text-zinc-400',
+    no_changes: 'bg-zinc-700 text-zinc-300',
   }
-  if (/github\.com/i.test(base)) {
-    return `${base}/compare/${start}...${end}`
+  return (
+    <span className={`px-1.5 py-0.5 text-[10px] uppercase tracking-wider rounded font-mono ${styles[status]}`}>
+      {status}
+    </span>
+  )
+}
+
+function Meta({ label, value }: { label: string; value: string | null | undefined }) {
+  return (
+    <div>
+      <span className="text-zinc-500">{label}:</span>{' '}
+      <span className="text-zinc-300 font-mono">{value ?? '—'}</span>
+    </div>
+  )
+}
+
+function Section({
+  title, tone = 'default', children,
+}: {
+  title: string
+  tone?: 'default' | 'error'
+  children: React.ReactNode
+}) {
+  return (
+    <div className={`px-4 py-3 border-b border-zinc-900 ${tone === 'error' ? 'bg-red-950/20' : ''}`}>
+      <h3 className="text-xs uppercase tracking-wider text-zinc-500 mb-2">{title}</h3>
+      {children}
+    </div>
+  )
+}
+
+function LogItem({
+  log, expanded, onToggle,
+}: {
+  log: DeveloperLog
+  expanded: boolean
+  onToggle: () => void
+}) {
+  const summary = summariseEvent(log)
+  return (
+    <li className="rounded border border-zinc-800 bg-zinc-900/50">
+      <button
+        onClick={onToggle}
+        className="w-full text-left px-2 py-1 flex items-center gap-2 text-xs hover:bg-zinc-900"
+      >
+        <span className="text-zinc-500 font-mono w-16 shrink-0">{log.eventType}</span>
+        <span className="text-zinc-400 truncate flex-1">{summary}</span>
+        <span className="text-zinc-600 shrink-0">{new Date(log.timestamp).toLocaleTimeString()}</span>
+      </button>
+      {expanded && (
+        <pre className="px-2 py-2 text-[11px] text-zinc-400 font-mono whitespace-pre-wrap break-words border-t border-zinc-800">
+          {JSON.stringify(log.data, null, 2)}
+        </pre>
+      )}
+    </li>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function summariseEvent(log: DeveloperLog): string {
+  const data = log.data as any
+  if (log.eventType === 'assistant') {
+    const content = data?.message?.content
+    if (Array.isArray(content)) {
+      const parts = content
+        .map((c: { type?: string; text?: string; name?: string }) =>
+          c?.type === 'text' ? (c.text ?? '').slice(0, 80) :
+          c?.type === 'tool_use' ? `→ ${c.name}` :
+          c?.type
+        )
+        .filter(Boolean)
+      return parts.join(' | ') || '(empty)'
+    }
   }
-  if (/gitlab\.com/i.test(base)) {
-    return `${base}/-/compare/${start}...${end}`
+  if (log.eventType === 'system' && data?.subtype) return `system/${data.subtype}`
+  if (log.eventType === 'result') {
+    const cost = typeof data?.total_cost_usd === 'number' ? `$${data.total_cost_usd.toFixed(4)}` : ''
+    const stop = typeof data?.stop_reason === 'string' ? data.stop_reason : ''
+    return [stop, cost].filter(Boolean).join(' • ')
   }
-  if (/bitbucket\.org/i.test(base)) {
-    return `${base}/branches/compare/${end}..${start}`
-  }
-  return null
+  if (log.eventType === 'stderr') return (data?.text ?? '').slice(0, 120)
+  return JSON.stringify(data).slice(0, 120)
+}
+
+function relTime(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const ms = Date.now() - new Date(iso).getTime()
+  if (ms < 60_000) return `${Math.floor(ms / 1000)}s ago`
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m ago`
+  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h ago`
+  return `${Math.floor(ms / 86_400_000)}d ago`
+}
+
+function formatDuration(ms: number | null | undefined): string | null {
+  if (ms == null) return null
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.floor(ms / 60_000)}m ${Math.floor((ms % 60_000) / 1000)}s`
 }
 
 function useNow(intervalMs: number = 1000): number {
@@ -922,19 +922,29 @@ function useNow(intervalMs: number = 1000): number {
   return now
 }
 
-function formatDuration(
-  startedAt: string | null,
-  finishedAt: string | null,
-  now: number = Date.now(),
-): string {
-  if (!startedAt) return '—'
-  const start = new Date(startedAt).getTime()
-  const end = finishedAt ? new Date(finishedAt).getTime() : now
-  const ms = Math.max(0, end - start)
-  if (ms < 1000) return `${ms}ms`
-  const s = Math.floor(ms / 1000)
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  const rem = s % 60
-  return `${m}m ${rem}s`
+function liveDuration(run: DeveloperRun, now: number): string | null {
+  if (run.durationMs != null) return formatDuration(run.durationMs)
+  if (run.status === 'running' && run.startedAt) {
+    return formatDuration(now - new Date(run.startedAt).getTime())
+  }
+  return null
+}
+
+function tokensSummary(run: DeveloperRun): string | null {
+  const usage = (run.trailer?.usage ?? {}) as Record<string, number | undefined>
+  const inT = usage.input_tokens
+  const outT = usage.output_tokens
+  if (inT == null && outT == null) return null
+  const inS = inT != null ? `${(inT / 1000).toFixed(1)}k` : '?'
+  const outS = outT != null ? `${(outT / 1000).toFixed(1)}k` : '?'
+  return `↑${inS} ↓${outS}`
+}
+
+function cacheSummary(run: DeveloperRun): string | null {
+  const usage = (run.trailer?.usage ?? {}) as Record<string, number | undefined>
+  const read = usage.cache_read_input_tokens
+  const write = usage.cache_creation_input_tokens
+  if (!read && !write) return null
+  const fmt = (n: number | undefined) => n ? (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`) : '0'
+  return `cache W${fmt(write)} R${fmt(read)}`
 }

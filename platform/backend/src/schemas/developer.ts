@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 export const developerStatusSchema = z.enum(['offline', 'idle', 'busy', 'error', 'destroyed'])
-export const runModeSchema = z.enum(['implement', 'clarify'])
+export const runModeSchema = z.enum(['implement', 'clarify', 'chat'])
 export const runStatusSchema = z.enum([
   'pending',
   'queued',
@@ -70,9 +70,33 @@ export const developerRunSchema = z.object({
   pushError: z.string().nullable(),
   resumeContext: z.string().nullable(),
   parentRunId: z.string().uuid().nullable(),
+  chatId: z.string().uuid().nullable(),
   createdAt: z.date(),
   updatedAt: z.date(),
 })
+
+export const developerChatSchema = z.object({
+  id: z.string().uuid(),
+  developerId: z.string().uuid(),
+  title: z.string().nullable(),
+  claudeSessionId: z.string().nullable(),
+  lastMessageAt: z.date().nullable(),
+  createdAt: z.date(),
+  updatedAt: z.date(),
+})
+
+export const createDeveloperChatSchema = z.object({
+  developerId: z.string().uuid(),
+  title: z.string().max(200).optional(),
+})
+
+export const updateDeveloperChatSchema = z.object({
+  title: z.string().max(200).nullable().optional(),
+})
+
+export type DeveloperChat = z.infer<typeof developerChatSchema>
+export type CreateDeveloperChat = z.infer<typeof createDeveloperChatSchema>
+export type UpdateDeveloperChat = z.infer<typeof updateDeveloperChatSchema>
 
 export const developerLogSchema = z.object({
   id: z.string().uuid(),
@@ -89,6 +113,9 @@ export const dispatchSchema = z.object({
   // immediately. Defaults to true (direct HTTP dispatches are explicit user
   // actions). Coordinator-driven dispatches pass false to require approval.
   autoApprove: z.boolean().optional(),
+  // When set, dispatch joins an existing chat. Mode is forced to 'chat',
+  // and the worker resumes the chat's claude session id.
+  chatId: z.string().uuid().optional(),
 })
 
 export const editRunInstructionsSchema = z.object({

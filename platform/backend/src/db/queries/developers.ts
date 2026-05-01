@@ -1,12 +1,15 @@
 import { randomBytes } from 'crypto'
 import { v4 as uuid } from 'uuid'
-import { db, DbDeveloper, DbDeveloperRun, DbDeveloperLog } from '../connection.js'
+import { db, DbDeveloper, DbDeveloperRun, DbDeveloperLog, DbDeveloperChat } from '../connection.js'
 import {
   Developer,
   CreateDeveloper,
   UpdateDeveloper,
   DeveloperRun,
   DeveloperLog,
+  DeveloperChat,
+  CreateDeveloperChat,
+  UpdateDeveloperChat,
   RunMode,
   RunStatus,
   DeveloperStatus,
@@ -72,6 +75,17 @@ const toRun = (row: DbDeveloperRun): DeveloperRun => ({
   pushError: row.push_error ?? null,
   resumeContext: row.resume_context ?? null,
   parentRunId: row.parent_run_id ?? null,
+  chatId: row.chat_id ?? null,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+})
+
+const toDeveloperChat = (row: DbDeveloperChat): DeveloperChat => ({
+  id: row.id,
+  developerId: row.developer_id,
+  title: row.title,
+  claudeSessionId: row.claude_session_id,
+  lastMessageAt: row.last_message_at,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 })
@@ -167,7 +181,7 @@ export const createRun = async (
   instructions: string,
   mode: RunMode = 'implement',
   initialStatus: RunStatus = 'queued',
-  extras: { resumeContext?: string | null; parentRunId?: string | null } = {}
+  extras: { resumeContext?: string | null; parentRunId?: string | null; chatId?: string | null } = {}
 ): Promise<DeveloperRun> => {
   const [row] = await db<DbDeveloperRun>('developer_runs')
     .insert({
@@ -178,6 +192,7 @@ export const createRun = async (
       status: initialStatus,
       resume_context: extras.resumeContext ?? null,
       parent_run_id: extras.parentRunId ?? null,
+      chat_id: extras.chatId ?? null,
     })
     .returning('*')
   return toRun(row)
@@ -338,4 +353,90 @@ export const listLogs = async (runId: string): Promise<DeveloperLog[]> => {
     .where({ run_id: runId })
     .orderBy('timestamp', 'asc')
   return rows.map(toLog)
+}
+
+// --- Developer chat CRUD ---
+
+export const createDeveloperChat = async (
+  data: CreateDeveloperChat & { claudeSessionId?: string | null; firstMessageAt?: Date | null }
+): Promise<DeveloperChat> => {
+  const [row] = await db<DbDeveloperChat>('developer_chats')
+    .insert({
+      id: uuid(),
+      developer_id: data.developerId,
+      title: data.title ?? null,
+      claude_session_id: data.claudeSessionId ?? null,
+      last_message_at: data.firstMessageAt ?? null,
+    })
+    .returning('*')
+  return toDeveloperChat(row)
+}
+
+export const getDeveloperChat = async (id: string): Promise<DeveloperChat | null> => {
+  const row = await db<DbDeveloperChat>('developer_chats').where({ id }).first()
+  return row ? toDeveloperChat(row) : null
+}
+
+export const listDeveloperChats = async (developerId: string): Promise<DeveloperChat[]> => {
+  const rows = await db<DbDeveloperChat>('developer_chats')
+    .where({ developer_id: developerId })
+    .orderBy('last_message_at', 'desc')
+    .orderBy('created_at', 'desc')
+  return rows.map(toDeveloperChat)
+}
+
+export const updateDeveloperChat = async (
+  id: string,
+  data: UpdateDeveloperChat & {
+    claudeSessionId?: string | null
+    lastMessageAt?: Date | null
+  }
+): Promise<DeveloperChat | null> => {
+  const update: Partial<DbDeveloperChat> = {}
+  if (data.title !== undefined) update.title = data.title
+  if (data.claudeSessionId !== undefined) update.claude_session_id = data.claudeSessionId
+  if (data.lastMessageAt !== undefined) update.last_message_at = data.lastMessageAt
+
+  const [row] = await db<DbDeveloperChat>('developer_chats')
+    .where({ id })
+    .update({ ...update, updated_at: new Date() })
+    .returning('*')
+  return row ? toDeveloperChat(row) : null
+}
+
+export const deleteDeveloperChat = async (id: string): Promise<boolean> => {
+  const count = await db<DbDeveloperChat>('developer_chats').where({ id }).delete()
+  return count > 0
+}
+
+// Find the most recent terminal run in a chat that captured a session_id
+// — that's the resume point for the next dispatch. Falls back to the
+// chat's claude_session_id (set on promote-to-chat).
+export const getDeveloperChatResumeSessionId = async (chatId: string): Promise<string | null> => {
+  const row = await db<DbDeveloperRun>('developer_runs')
+    .where({ chat_id: chatId })
+    .whereNotNull('session_id')
+    .orderBy('created_at', 'desc')
+    .first()
+  if (row?.session_id) return row.session_id
+  const chat = await db<DbDeveloperChat>('developer_chats').where({ id: chatId }).first()
+  return chat?.claude_session_id ?? null
+}
+
+export const listDeveloperChatRuns = async (chatId: string): Promise<DeveloperRun[]> => {
+  const rows = await db<DbDeveloperRun>('developer_runs')
+    .where({ chat_id: chatId })
+    .orderBy('created_at', 'asc')
+  return rows.map(toRun)
+}
+
+export const setRunChatId = async (
+  runId: string,
+  chatId: string
+): Promise<DeveloperRun | null> => {
+  const [row] = await db<DbDeveloperRun>('developer_runs')
+    .where({ id: runId })
+    .update({ chat_id: chatId, updated_at: new Date() })
+    .returning('*')
+  return row ? toRun(row) : null
 }

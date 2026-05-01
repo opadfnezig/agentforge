@@ -132,6 +132,24 @@ Complete the task. You don't need to commit — the coordinator handles that aft
 `;
 }
 
+function buildChatPrompt(instructions: string, resumeContext?: string | null): string {
+  return `You are an AgentForge developer in CHAT mode at /workspace.
+
+This is a multi-turn conversation. The user may ask questions, request small edits, or pivot to bigger tasks. You decide what each message wants:
+- A question? Read what's relevant and answer.
+- A small fix? Make it. Commit only when it's a coherent change the user has accepted.
+- An ambiguous request? Ask, don't guess.
+
+## Critical guidance
+- USE BULK READS. Read related files in parallel rather than sequentially.
+- Don't repeat content the user has already seen earlier in this session — they have scrollback.
+- Don't commit/push automatically every turn. Discuss first, commit when the change is settled.
+- Match existing code style; respect the project's conventions.
+
+${buildTaskSection(instructions, resumeContext, '## Current message')}
+`;
+}
+
 function buildClarifyPrompt(instructions: string, resumeContext?: string | null): string {
   return `You are an AgentForge developer in CLARIFY mode. You will NOT make changes. Your job is to:
 1. Read the relevant files to understand the current state
@@ -157,8 +175,9 @@ type DispatchMessage = {
   type: 'dispatch';
   runId: string;
   instructions: string;
-  mode: 'implement' | 'clarify';
+  mode: 'implement' | 'clarify' | 'chat';
   resumeContext?: string | null;
+  sessionId?: string | null;
 };
 
 type IncomingMessage = DispatchMessage | { type: string; [k: string]: unknown };
@@ -269,8 +288,8 @@ class DeveloperClient {
   }
 
   private async handleDispatch(msg: DispatchMessage): Promise<void> {
-    const { runId, instructions, mode, resumeContext } = msg;
-    log(`Dispatch runId=${runId} mode=${mode}${resumeContext ? ' (with resume_context)' : ''}`);
+    const { runId, instructions, mode, resumeContext, sessionId } = msg;
+    log(`Dispatch runId=${runId} mode=${mode}${resumeContext ? ' (with resume_context)' : ''}${sessionId ? ` resume=${sessionId.slice(0, 8)}` : ''}`);
 
     if (this.currentRun) {
       logErr(`Rejecting dispatch; run ${this.currentRun.runId} already in progress`);
@@ -321,9 +340,11 @@ class DeveloperClient {
 
     const prompt = mode === 'clarify'
       ? buildClarifyPrompt(instructions, resumeContext)
+      : mode === 'chat'
+      ? buildChatPrompt(instructions, resumeContext)
       : buildImplementPrompt(instructions, resumeContext);
 
-    const { exitCode, finalAssistantText } = await this.runClaude(runId, prompt);
+    const { exitCode, finalAssistantText } = await this.runClaude(runId, prompt, sessionId ?? null);
 
     if (exitCode !== 0) {
       this.send({
@@ -336,7 +357,12 @@ class DeveloperClient {
       return;
     }
 
-    if (mode === 'clarify') {
+    if (mode === 'clarify' || mode === 'chat') {
+      // Chat mode: don't auto-commit. The user controls when work is
+      // settled; auto-pushing every chat turn would create commit noise
+      // for half-formed exchanges. If the agent did edit files during a
+      // chat turn, surface that via push_status='not_attempted' — the
+      // user can promote to a normal implement run when ready.
       this.send({
         type: 'run_update',
         runId,
@@ -430,12 +456,13 @@ class DeveloperClient {
     this.currentRun = null;
   }
 
-  private runClaude(runId: string, prompt: string): Promise<{ exitCode: number; finalAssistantText: string }> {
+  private runClaude(runId: string, prompt: string, resumeSessionId: string | null): Promise<{ exitCode: number; finalAssistantText: string }> {
     return new Promise((resolve) => {
       const args = [
         '--dangerously-skip-permissions',
         '--print',
         '--verbose',
+        ...(resumeSessionId ? ['--resume', resumeSessionId] : []),
         '--output-format', 'stream-json',
         '--max-turns', String(this.config.maxTurns),
         prompt,

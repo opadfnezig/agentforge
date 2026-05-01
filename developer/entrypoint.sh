@@ -28,8 +28,9 @@ runuser -u agent -- git config --global --add safe.directory /workspace
 # Fix ownership on the persistent claude memory/session mount. The
 # spawner creates these dirs as uid 10001 on the host, but the agent
 # user inside the container is uid 1000 — without this, claude can't
-# write its memory files or session JSONLs.
+# write its memory files or session JSONLs. Scope the chown to
+# /projects so it doesn't hit the read-only credentials.json mount.
 mkdir -p /home/agent/.claude/projects/-workspace/memory
-chown -R agent:agent /home/agent/.claude || true
+chown -R agent:agent /home/agent/.claude/projects 2>/dev/null || true
 
 exec runuser -u agent -- "$@"

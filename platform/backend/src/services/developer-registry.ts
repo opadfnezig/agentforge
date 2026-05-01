@@ -48,6 +48,10 @@ export interface DispatchMessage {
   // Stitched failure context from a prior attempt (set by /continue). The
   // worker prepends this to the rendered prompt before instructions.
   resumeContext?: string | null
+  // Claude CLI session id to resume — set on chat-mode dispatches so the
+  // worker calls `claude --resume <id>` and conversation context survives
+  // across turns.
+  sessionId?: string | null
 }
 
 /**
@@ -102,9 +106,15 @@ class DeveloperRegistry {
     const next = await developerQueries.getNextQueuedRun(developerId)
     if (!next) return
 
-    logger.info({ developerId, runId: next.id }, 'Assigning queued run')
+    // Look up resume sessionId for chat-mode runs.
+    let resumeSessionId: string | null = null
+    if (next.chatId) {
+      resumeSessionId = await developerQueries.getDeveloperChatResumeSessionId(next.chatId)
+    }
+
+    logger.info({ developerId, runId: next.id, resumeSessionId }, 'Assigning queued run')
     // Fire-and-forget; dispatch waits internally for completion.
-    this.dispatch(developerId, next.id, next.instructions, next.mode, next.resumeContext).catch(async (err) => {
+    this.dispatch(developerId, next.id, next.instructions, next.mode, next.resumeContext, resumeSessionId).catch(async (err) => {
       logger.error({ err, runId: next.id }, 'Queued dispatch failed')
       await developerQueries.updateRun(next.id, {
         status: 'failure',
@@ -143,7 +153,8 @@ class DeveloperRegistry {
     runId: string,
     instructions: string,
     mode: RunMode,
-    resumeContext?: string | null
+    resumeContext?: string | null,
+    sessionId?: string | null
   ): Promise<void> {
     const ws = this.sockets.get(developerId)
     if (!ws || ws.readyState !== 1) {
@@ -152,8 +163,9 @@ class DeveloperRegistry {
 
     const message: DispatchMessage = { type: 'dispatch', runId, instructions, mode }
     if (resumeContext) message.resumeContext = resumeContext
+    if (sessionId) message.sessionId = sessionId
     ws.send(JSON.stringify(message))
-    logger.info({ developerId, runId, mode }, 'Dispatched run')
+    logger.info({ developerId, runId, mode, sessionId }, 'Dispatched run')
 
     // Mark developer busy, run running
     await developerQueries.updateDeveloper(developerId, { status: 'busy' })

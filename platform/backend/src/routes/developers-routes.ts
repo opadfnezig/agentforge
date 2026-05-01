@@ -167,16 +167,32 @@ developersRouter.get('/:id/secret', async (req, res, next) => {
 // user action from the coordinator chat badge.
 developersRouter.post('/:id/dispatch', async (req, res, next) => {
   try {
-    const { instructions, mode, autoApprove } = dispatchSchema.parse(req.body)
+    const { instructions, mode, autoApprove, chatId } = dispatchSchema.parse(req.body)
     const developer = await developerQueries.getDeveloper(req.params.id)
     if (!developer) {
       throw new AppError(404, 'Developer not found', 'DEVELOPER_NOT_FOUND')
     }
 
-    const finalMode = mode || 'implement'
+    // Chat-mode wiring: validate chatId belongs to this developer and
+    // force mode=chat (a single chat can't mix implement/clarify with
+    // chat — they have different post-run semantics).
+    let finalChatId: string | null = null
+    if (chatId) {
+      const chat = await developerQueries.getDeveloperChat(chatId)
+      if (!chat || chat.developerId !== developer.id) {
+        throw new AppError(404, 'Chat not found', 'CHAT_NOT_FOUND')
+      }
+      finalChatId = chat.id
+    }
+
+    const finalMode = finalChatId ? 'chat' : (mode || 'implement')
     const shouldApprove = autoApprove !== false
     const initialStatus = shouldApprove ? 'queued' : 'pending'
-    const run = await developerQueries.createRun(developer.id, instructions, finalMode, initialStatus)
+    const run = await developerQueries.createRun(developer.id, instructions, finalMode, initialStatus, { chatId: finalChatId })
+
+    if (finalChatId) {
+      await developerQueries.updateDeveloperChat(finalChatId, { lastMessageAt: new Date() })
+    }
 
     const online = developerRegistry.isOnline(developer.id)
     const idle = online && developer.status === 'idle'
@@ -477,6 +493,173 @@ developersRouter.get('/:id/runs/:runId/stream', async (req: Request, res: Respon
       cleanup()
       res.end()
     }
+  } catch (error) {
+    next(error)
+  }
+})
+
+// --- Developer chat endpoints ---
+
+developersRouter.post('/:id/chats', async (req, res, next) => {
+  try {
+    const developer = await developerQueries.getDeveloper(req.params.id)
+    if (!developer) {
+      throw new AppError(404, 'Developer not found', 'DEVELOPER_NOT_FOUND')
+    }
+    const title = typeof req.body?.title === 'string' ? req.body.title : undefined
+    const chat = await developerQueries.createDeveloperChat({
+      developerId: developer.id,
+      title,
+    })
+    logger.info({ developerId: developer.id, chatId: chat.id }, 'Developer chat created')
+    res.status(201).json(chat)
+  } catch (error) {
+    next(error)
+  }
+})
+
+developersRouter.post('/:id/runs/:runId/promote-to-chat', async (req, res, next) => {
+  try {
+    const developer = await developerQueries.getDeveloper(req.params.id)
+    if (!developer) {
+      throw new AppError(404, 'Developer not found', 'DEVELOPER_NOT_FOUND')
+    }
+    const run = await developerQueries.getRun(req.params.runId)
+    if (!run || run.developerId !== developer.id) {
+      throw new AppError(404, 'Run not found', 'RUN_NOT_FOUND')
+    }
+    if (run.chatId) {
+      throw new AppError(409, 'Run already part of a chat', 'RUN_ALREADY_IN_CHAT')
+    }
+    if (!run.sessionId) {
+      throw new AppError(
+        400,
+        'Run has no captured session_id, cannot resume — let it complete once before promoting',
+        'NO_SESSION_ID'
+      )
+    }
+    const title = (run.instructions || 'Chat').slice(0, 80)
+    const chat = await developerQueries.createDeveloperChat({
+      developerId: developer.id,
+      title,
+      claudeSessionId: run.sessionId,
+      firstMessageAt: run.startedAt ?? run.createdAt,
+    })
+    await developerQueries.setRunChatId(run.id, chat.id)
+    logger.info(
+      { developerId: developer.id, chatId: chat.id, sourceRunId: run.id },
+      'Run promoted to chat'
+    )
+    res.status(201).json(chat)
+  } catch (error) {
+    next(error)
+  }
+})
+
+developersRouter.get('/:id/chats', async (req, res, next) => {
+  try {
+    const developer = await developerQueries.getDeveloper(req.params.id)
+    if (!developer) {
+      throw new AppError(404, 'Developer not found', 'DEVELOPER_NOT_FOUND')
+    }
+    const chats = await developerQueries.listDeveloperChats(developer.id)
+    res.json(chats)
+  } catch (error) {
+    next(error)
+  }
+})
+
+developersRouter.get('/:id/chats/:chatId', async (req, res, next) => {
+  try {
+    const chat = await developerQueries.getDeveloperChat(req.params.chatId)
+    if (!chat || chat.developerId !== req.params.id) {
+      throw new AppError(404, 'Chat not found', 'CHAT_NOT_FOUND')
+    }
+    const messages = await developerQueries.listDeveloperChatRuns(chat.id)
+    res.json({ chat, messages })
+  } catch (error) {
+    next(error)
+  }
+})
+
+developersRouter.patch('/:id/chats/:chatId', async (req, res, next) => {
+  try {
+    const chat = await developerQueries.getDeveloperChat(req.params.chatId)
+    if (!chat || chat.developerId !== req.params.id) {
+      throw new AppError(404, 'Chat not found', 'CHAT_NOT_FOUND')
+    }
+    const title = req.body?.title ?? null
+    if (typeof title !== 'string' && title !== null) {
+      throw new AppError(400, 'title must be a string or null', 'INVALID_INPUT')
+    }
+    const updated = await developerQueries.updateDeveloperChat(chat.id, { title: title as string | null })
+    res.json(updated)
+  } catch (error) {
+    next(error)
+  }
+})
+
+developersRouter.delete('/:id/chats/:chatId', async (req, res, next) => {
+  try {
+    const chat = await developerQueries.getDeveloperChat(req.params.chatId)
+    if (!chat || chat.developerId !== req.params.id) {
+      throw new AppError(404, 'Chat not found', 'CHAT_NOT_FOUND')
+    }
+    await developerQueries.deleteDeveloperChat(chat.id)
+    logger.info({ developerId: req.params.id, chatId: chat.id }, 'Developer chat deleted')
+    res.status(204).send()
+  } catch (error) {
+    next(error)
+  }
+})
+
+// --- Developer state files (memory dir on host) ---
+//
+// Mirrors oracle's /state route: walks the dev's memory dir on the host
+// (mounted from <name>/state/memory) and returns markdown contents. Lets
+// the UI render what the dev knows for that scope.
+developersRouter.get('/:id/state', async (req, res, next) => {
+  try {
+    const developer = await developerQueries.getDeveloper(req.params.id)
+    if (!developer) {
+      throw new AppError(404, 'Developer not found', 'DEVELOPER_NOT_FOUND')
+    }
+    // Each dev's memory lives at <NTFR_HOST_WORKDIR>/<dev-name>-dev/state/memory
+    // on the host; the spawner created it via the chained mount layout.
+    // Backend can read it directly because backend + spawner are on the
+    // same host. (Multi-host support will eventually hit the worker via
+    // an embedded HTTP endpoint instead.)
+    const { promises: fsp } = await import('fs')
+    const path = await import('path')
+    // Allow override via NTFR_HOST_WORKDIR env (matches spawner).
+    const root = process.env.NTFR_HOST_WORKDIR || '/ntfr/ntfr'
+    const memoryDir = path.join(root, `${developer.name}-dev`, 'state', 'memory')
+    type FileOut = { name: string; content: string }
+    const out: FileOut[] = []
+    const walk = async (dir: string, prefix: string): Promise<void> => {
+      let entries
+      try {
+        entries = await fsp.readdir(dir, { withFileTypes: true })
+      } catch {
+        return
+      }
+      for (const e of entries) {
+        const name = e.name as string
+        const rel = prefix ? `${prefix}/${name}` : name
+        const abs = path.join(dir, name)
+        if (e.isDirectory()) {
+          await walk(abs, rel)
+        } else if (e.isFile() && name.endsWith('.md')) {
+          try {
+            const content = await fsp.readFile(abs, 'utf-8')
+            out.push({ name: rel, content })
+          } catch { /* skip */ }
+        }
+      }
+    }
+    await walk(memoryDir, '')
+    out.sort((a, b) => a.name.localeCompare(b.name))
+    res.json({ developerId: developer.id, files: out })
   } catch (error) {
     next(error)
   }

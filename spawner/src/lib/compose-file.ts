@@ -92,9 +92,11 @@ const buildKindVolumes = (kind: string, name: string): string[] => {
       // from /mnt/ssh-src into /home/agent/.ssh with 600/700 perms; the
       // mount stays RO so the original keys can't be modified.
       '/root/.ssh:/mnt/ssh-src:ro',
-      // Persistent memory for Claude CLI. Same path encoding as oracle
-      // (WORKDIR=/workspace → ~/.claude/projects/-workspace/memory).
-      `./${name}/memories:/home/agent/.claude/projects/-workspace/memory:rw`,
+      // Persistent claude project root: holds memory subdir + session
+      // JSONL files at <id>.jsonl. Mounting the parent (not just memory)
+      // is what makes chat continuation survive container restarts.
+      // Host layout: <name>/state/{memory/, <session-uuid>.jsonl}
+      `./${name}/state:/home/agent/.claude/projects/-workspace:rw`,
     ]
   }
   if (kind === 'researcher') {
