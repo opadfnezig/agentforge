@@ -297,7 +297,7 @@ class OracleClient {
       return;
     }
 
-    if (mode !== 'read' && mode !== 'write' && mode !== 'migrate') {
+    if (mode !== 'read' && mode !== 'write' && mode !== 'migrate' && mode !== 'chat') {
       this.send({
         type: 'run_update',
         runId,
