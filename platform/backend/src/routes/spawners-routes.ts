@@ -310,10 +310,21 @@ spawnersRouter.post('/:id/spawn-intents/:intentId/approve', async (req, res, nex
           'Caller-supplied mounts on oracle spawn dropped — oracle mounts are backend-only'
         )
       }
+      // Mount the WHOLE -workspace project dir, not just the memory subdir.
+      // Reason: claude CLI writes session JSONL files at the project root
+      // (~/.claude/projects/-workspace/<session-uuid>.jsonl) — those are
+      // what `--resume <id>` reads from, so they must survive container
+      // restarts to support chat continuation. The memory subdir (which
+      // holds .md files the oracle reads/writes) lives inside the same
+      // parent, so a single mount handles both.
+      //
+      // Host layout under .../oracles/<primitive>/state/:
+      //   memory/         (-> /home/agent/.claude/projects/-workspace/memory/)
+      //   <uuid>.jsonl    (-> /home/agent/.claude/projects/-workspace/<uuid>.jsonl)
       const oracleMounts = [
         {
-          source: `./oracles/${intent.primitiveName}/memory`,
-          target: '/home/agent/.claude/projects/-workspace/memory',
+          source: `./oracles/${intent.primitiveName}/state`,
+          target: '/home/agent/.claude/projects/-workspace',
           readOnly: false,
         },
         {

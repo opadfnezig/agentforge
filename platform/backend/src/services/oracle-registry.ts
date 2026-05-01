@@ -40,6 +40,7 @@ interface DispatchMessage {
   runId: string
   mode: OracleMode
   payload: string
+  sessionId?: string | null
 }
 
 class OracleRegistry {
@@ -105,8 +106,16 @@ class OracleRegistry {
     const next = await oracleQueries.getNextQueuedOracleQuery(oracleId)
     if (!next) return
 
-    logger.info({ oracleId, queryId: next.id, mode: next.mode }, 'Assigning queued oracle query')
-    this.dispatch(oracleId, next.id, next.mode, next.message).catch(async (err) => {
+    // For chat queries, find the resume session id from prior turns in the
+    // same chat. The worker passes this to claude --resume so the model
+    // continues the conversation instead of starting cold.
+    let resumeSessionId: string | null = null
+    if (next.chatId) {
+      resumeSessionId = await oracleQueries.getChatResumeSessionId(next.chatId)
+    }
+
+    logger.info({ oracleId, queryId: next.id, mode: next.mode, resumeSessionId }, 'Assigning queued oracle query')
+    this.dispatch(oracleId, next.id, next.mode, next.message, resumeSessionId).catch(async (err) => {
       logger.error({ err, queryId: next.id }, 'Queued oracle dispatch failed')
       const updated = await oracleQueries.updateOracleQuery(next.id, {
         status: 'failure',
@@ -133,7 +142,8 @@ class OracleRegistry {
     oracleId: string,
     queryId: string,
     mode: OracleMode,
-    message: string
+    message: string,
+    sessionId?: string | null
   ): Promise<void> {
     const ws = this.sockets.get(oracleId)
     if (!ws || ws.readyState !== 1) {
@@ -144,9 +154,15 @@ class OracleRegistry {
     }
 
     this.busy.set(oracleId, queryId)
-    const dispatchMsg: DispatchMessage = { type: 'dispatch', runId: queryId, mode, payload: message }
+    const dispatchMsg: DispatchMessage = {
+      type: 'dispatch',
+      runId: queryId,
+      mode,
+      payload: message,
+      sessionId: sessionId ?? null,
+    }
     ws.send(JSON.stringify(dispatchMsg))
-    logger.info({ oracleId, queryId, mode }, 'Oracle dispatch sent')
+    logger.info({ oracleId, queryId, mode, sessionId }, 'Oracle dispatch sent')
 
     const updated = await oracleQueries.updateOracleQuery(queryId, {
       status: 'running',

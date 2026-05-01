@@ -1,5 +1,5 @@
 import { randomBytes } from 'crypto'
-import { db, DbOracle, DbOracleQuery, DbOracleLog } from '../connection.js'
+import { db, DbOracle, DbOracleQuery, DbOracleLog, DbOracleChat } from '../connection.js'
 import {
   Oracle,
   CreateOracle,
@@ -8,6 +8,9 @@ import {
   OracleQueryStatus,
   OracleMode,
   OracleLog,
+  OracleChat,
+  CreateOracleChat,
+  UpdateOracleChat,
 } from '../../schemas/oracle.js'
 import { v4 as uuid } from 'uuid'
 import { readdir, readFile } from 'fs/promises'
@@ -68,6 +71,17 @@ const toOracleQuery = (row: DbOracleQuery): OracleQuery => ({
   trailer: parseNullableJson(row.trailer),
   resumeContext: row.resume_context,
   parentQueryId: row.parent_query_id,
+  chatId: row.chat_id ?? null,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+})
+
+const toOracleChat = (row: DbOracleChat): OracleChat => ({
+  id: row.id,
+  oracleId: row.oracle_id,
+  title: row.title,
+  claudeSessionId: row.claude_session_id,
+  lastMessageAt: row.last_message_at,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 })
@@ -205,6 +219,7 @@ export interface CreateOracleQueryInput {
   status: OracleQueryStatus
   resumeContext?: string | null
   parentQueryId?: string | null
+  chatId?: string | null
 }
 
 export const createOracleQuery = async (
@@ -221,6 +236,7 @@ export const createOracleQuery = async (
       status: input.status,
       resume_context: input.resumeContext ?? null,
       parent_query_id: input.parentQueryId ?? null,
+      chat_id: input.chatId ?? null,
     })
     .returning('*')
   return toOracleQuery(row)
@@ -368,4 +384,93 @@ export const getOracleQueryLastAssistantText = async (
     .join('\n')
     .trim()
   return text.length > 0 ? text : null
+}
+
+// --- Oracle chat CRUD ---
+
+export const createOracleChat = async (
+  data: CreateOracleChat & { claudeSessionId?: string | null; firstMessageAt?: Date | null }
+): Promise<OracleChat> => {
+  const [row] = await db<DbOracleChat>('oracle_chats')
+    .insert({
+      id: uuid(),
+      oracle_id: data.oracleId,
+      title: data.title ?? null,
+      claude_session_id: data.claudeSessionId ?? null,
+      last_message_at: data.firstMessageAt ?? null,
+    })
+    .returning('*')
+  return toOracleChat(row)
+}
+
+export const getOracleChat = async (id: string): Promise<OracleChat | null> => {
+  const row = await db<DbOracleChat>('oracle_chats').where({ id }).first()
+  return row ? toOracleChat(row) : null
+}
+
+export const listOracleChats = async (oracleId: string): Promise<OracleChat[]> => {
+  const rows = await db<DbOracleChat>('oracle_chats')
+    .where({ oracle_id: oracleId })
+    .orderBy('last_message_at', 'desc')
+    .orderBy('created_at', 'desc')
+  return rows.map(toOracleChat)
+}
+
+export const updateOracleChat = async (
+  id: string,
+  data: UpdateOracleChat & {
+    claudeSessionId?: string | null
+    lastMessageAt?: Date | null
+  }
+): Promise<OracleChat | null> => {
+  const update: Partial<DbOracleChat> = {}
+  if (data.title !== undefined) update.title = data.title
+  if (data.claudeSessionId !== undefined) update.claude_session_id = data.claudeSessionId
+  if (data.lastMessageAt !== undefined) update.last_message_at = data.lastMessageAt
+
+  const [row] = await db<DbOracleChat>('oracle_chats')
+    .where({ id })
+    .update({ ...update, updated_at: new Date() })
+    .returning('*')
+  return row ? toOracleChat(row) : null
+}
+
+export const deleteOracleChat = async (id: string): Promise<boolean> => {
+  const count = await db<DbOracleChat>('oracle_chats').where({ id }).delete()
+  return count > 0
+}
+
+// Pick the most recent terminal query in a chat that captured a session_id —
+// that's the resume point for the next turn. Falls back to chat.claude_session_id
+// (set when chat was created from an existing query).
+export const getChatResumeSessionId = async (chatId: string): Promise<string | null> => {
+  const row = await db<DbOracleQuery>('oracle_queries')
+    .where({ chat_id: chatId })
+    .whereNotNull('session_id')
+    .orderBy('created_at', 'desc')
+    .first()
+  if (row?.session_id) return row.session_id
+  const chat = await db<DbOracleChat>('oracle_chats').where({ id: chatId }).first()
+  return chat?.claude_session_id ?? null
+}
+
+export const listOracleChatQueries = async (chatId: string): Promise<OracleQuery[]> => {
+  const rows = await db<DbOracleQuery>('oracle_queries')
+    .where({ chat_id: chatId })
+    .orderBy('created_at', 'asc')
+  return rows.map(toOracleQuery)
+}
+
+// Attach an existing query to a chat (used by promote-to-chat). Plain
+// chat_id update — separate helper because UpdateOracleQueryInput
+// intentionally doesn't expose chat_id (chats are owned, not retargeted).
+export const setQueryChatId = async (
+  queryId: string,
+  chatId: string
+): Promise<OracleQuery | null> => {
+  const [row] = await db<DbOracleQuery>('oracle_queries')
+    .where({ id: queryId })
+    .update({ chat_id: chatId, updated_at: new Date() })
+    .returning('*')
+  return row ? toOracleQuery(row) : null
 }

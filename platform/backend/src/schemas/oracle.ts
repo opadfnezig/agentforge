@@ -35,7 +35,19 @@ export const updateOracleSchema = z.object({
   config: z.record(z.unknown()).optional(),
 })
 
-export const oracleModeSchema = z.enum(['read', 'write', 'migrate'])
+export const oracleModeSchema = z.enum(['read', 'write', 'migrate', 'chat'])
+
+export const oracleChatSchema = z.object({
+  id: z.string().uuid(),
+  oracleId: z.string().uuid(),
+  title: z.string().nullable(),
+  claudeSessionId: z.string().nullable(),
+  lastMessageAt: z.date().nullable(),
+  createdAt: z.date(),
+  updatedAt: z.date(),
+})
+
+export type OracleChat = z.infer<typeof oracleChatSchema>
 export const oracleQueryStatusSchema = z.enum([
   'pending',
   'queued',
@@ -65,6 +77,7 @@ export const oracleQuerySchema = z.object({
   trailer: z.record(z.unknown()).nullable(),
   resumeContext: z.string().nullable(),
   parentQueryId: z.string().uuid().nullable(),
+  chatId: z.string().uuid().nullable(),
   createdAt: z.date(),
   updatedAt: z.date(),
 })
@@ -81,7 +94,20 @@ export const oracleDispatchSchema = z.object({
   message: z.string().min(1),
   mode: oracleModeSchema.optional(),
   autoApprove: z.boolean().optional(),
+  chatId: z.string().uuid().optional(),
 })
+
+export const createOracleChatSchema = z.object({
+  oracleId: z.string().uuid(),
+  title: z.string().max(200).optional(),
+})
+
+export const updateOracleChatSchema = z.object({
+  title: z.string().max(200).nullable().optional(),
+})
+
+export type CreateOracleChat = z.infer<typeof createOracleChatSchema>
+export type UpdateOracleChat = z.infer<typeof updateOracleChatSchema>
 
 export const editOracleQueryMessageSchema = z.object({
   message: z.string().min(1),

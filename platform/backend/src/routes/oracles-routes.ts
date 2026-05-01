@@ -5,6 +5,8 @@ import {
   updateOracleSchema,
   oracleDispatchSchema,
   editOracleQueryMessageSchema,
+  createOracleChatSchema,
+  updateOracleChatSchema,
   OracleMode,
 } from '../schemas/oracle.js'
 import * as oracleQueries from '../db/queries/oracles.js'
@@ -196,13 +198,24 @@ oraclesRouter.post('/:id/query', async (req, res, next) => {
 // callers can pass autoApprove=false to require user approval.
 oraclesRouter.post('/:id/dispatch', async (req, res, next) => {
   try {
-    const { message, mode, autoApprove } = oracleDispatchSchema.parse(req.body)
+    const { message, mode, autoApprove, chatId } = oracleDispatchSchema.parse(req.body)
     const oracle = await oracleQueries.getOracle(req.params.id)
     if (!oracle) {
       throw new AppError(404, 'Oracle not found', 'ORACLE_NOT_FOUND')
     }
 
-    const finalMode: OracleMode = mode || 'read'
+    // If chatId is supplied, validate it belongs to this oracle and force
+    // mode=chat. Anything else is incoherent (you can't read-mode-into-chat).
+    let finalChatId: string | null = null
+    if (chatId) {
+      const chat = await oracleQueries.getOracleChat(chatId)
+      if (!chat || chat.oracleId !== oracle.id) {
+        throw new AppError(404, 'Chat not found', 'CHAT_NOT_FOUND')
+      }
+      finalChatId = chat.id
+    }
+
+    const finalMode: OracleMode = finalChatId ? 'chat' : (mode || 'read')
     const shouldApprove = autoApprove !== false
     const initialStatus = shouldApprove ? 'queued' : 'pending'
     const query = await oracleQueries.createOracleQuery({
@@ -210,7 +223,12 @@ oraclesRouter.post('/:id/dispatch', async (req, res, next) => {
       mode: finalMode,
       message,
       status: initialStatus,
+      chatId: finalChatId,
     })
+
+    if (finalChatId) {
+      await oracleQueries.updateOracleChat(finalChatId, { lastMessageAt: new Date() })
+    }
 
     if (shouldApprove) {
       oracleRegistry.assignNextQueued(oracle.id).catch((err) => {
@@ -228,7 +246,128 @@ oraclesRouter.post('/:id/dispatch', async (req, res, next) => {
       status: query.status,
       mode: query.mode,
       pending: !shouldApprove,
+      chatId: finalChatId,
     })
+  } catch (error) {
+    next(error)
+  }
+})
+
+// --- Chat endpoints ---
+
+// Create a new chat (empty — first message comes via /dispatch with chatId).
+oraclesRouter.post('/:id/chats', async (req, res, next) => {
+  try {
+    const { title } = createOracleChatSchema.parse({ ...req.body, oracleId: req.params.id })
+    const oracle = await oracleQueries.getOracle(req.params.id)
+    if (!oracle) {
+      throw new AppError(404, 'Oracle not found', 'ORACLE_NOT_FOUND')
+    }
+    const chat = await oracleQueries.createOracleChat({
+      oracleId: oracle.id,
+      title,
+    })
+    logger.info({ oracleId: oracle.id, chatId: chat.id }, 'Oracle chat created')
+    res.status(201).json(chat)
+  } catch (error) {
+    next(error)
+  }
+})
+
+// Promote an existing query into a chat. The query becomes the first message;
+// subsequent dispatches with this chatId resume from the captured session_id.
+oraclesRouter.post('/:id/queries/:queryId/promote-to-chat', async (req, res, next) => {
+  try {
+    const oracle = await oracleQueries.getOracle(req.params.id)
+    if (!oracle) {
+      throw new AppError(404, 'Oracle not found', 'ORACLE_NOT_FOUND')
+    }
+    const query = await oracleQueries.getOracleQuery(req.params.queryId)
+    if (!query || query.oracleId !== oracle.id) {
+      throw new AppError(404, 'Query not found', 'QUERY_NOT_FOUND')
+    }
+    if (query.chatId) {
+      throw new AppError(409, 'Query already part of a chat', 'QUERY_ALREADY_IN_CHAT')
+    }
+    if (!query.sessionId) {
+      throw new AppError(
+        400,
+        'Query has no captured session_id, cannot resume — run it once before promoting',
+        'NO_SESSION_ID'
+      )
+    }
+    const title = (query.message || 'Chat').slice(0, 80)
+    const chat = await oracleQueries.createOracleChat({
+      oracleId: oracle.id,
+      title,
+      claudeSessionId: query.sessionId,
+      firstMessageAt: query.startedAt ?? query.createdAt,
+    })
+    // Attach the source query to the new chat so it shows up as the first
+    // message in the thread.
+    await oracleQueries.setQueryChatId(query.id, chat.id)
+    logger.info({ oracleId: oracle.id, chatId: chat.id, sourceQueryId: query.id }, 'Query promoted to chat')
+    res.status(201).json(chat)
+  } catch (error) {
+    next(error)
+  }
+})
+
+// List chats for an oracle.
+oraclesRouter.get('/:id/chats', async (req, res, next) => {
+  try {
+    const oracle = await oracleQueries.getOracle(req.params.id)
+    if (!oracle) {
+      throw new AppError(404, 'Oracle not found', 'ORACLE_NOT_FOUND')
+    }
+    const chats = await oracleQueries.listOracleChats(oracle.id)
+    res.json(chats)
+  } catch (error) {
+    next(error)
+  }
+})
+
+// Get a single chat with its messages (queries, ordered ascending).
+oraclesRouter.get('/:id/chats/:chatId', async (req, res, next) => {
+  try {
+    const chat = await oracleQueries.getOracleChat(req.params.chatId)
+    if (!chat || chat.oracleId !== req.params.id) {
+      throw new AppError(404, 'Chat not found', 'CHAT_NOT_FOUND')
+    }
+    const messages = await oracleQueries.listOracleChatQueries(chat.id)
+    res.json({ chat, messages })
+  } catch (error) {
+    next(error)
+  }
+})
+
+// Update chat title.
+oraclesRouter.patch('/:id/chats/:chatId', async (req, res, next) => {
+  try {
+    const data = updateOracleChatSchema.parse(req.body)
+    const chat = await oracleQueries.getOracleChat(req.params.chatId)
+    if (!chat || chat.oracleId !== req.params.id) {
+      throw new AppError(404, 'Chat not found', 'CHAT_NOT_FOUND')
+    }
+    const updated = await oracleQueries.updateOracleChat(chat.id, data)
+    res.json(updated)
+  } catch (error) {
+    next(error)
+  }
+})
+
+// Delete a chat. The CASCADE on chat_id is SET NULL — queries keep their
+// own history but lose the chat link. Sessions on disk live until the
+// container restarts/destroys them.
+oraclesRouter.delete('/:id/chats/:chatId', async (req, res, next) => {
+  try {
+    const chat = await oracleQueries.getOracleChat(req.params.chatId)
+    if (!chat || chat.oracleId !== req.params.id) {
+      throw new AppError(404, 'Chat not found', 'CHAT_NOT_FOUND')
+    }
+    await oracleQueries.deleteOracleChat(chat.id)
+    logger.info({ oracleId: req.params.id, chatId: chat.id }, 'Oracle chat deleted')
+    res.status(204).send()
   } catch (error) {
     next(error)
   }

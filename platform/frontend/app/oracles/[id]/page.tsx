@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams } from 'next/navigation'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -12,6 +12,7 @@ import {
   type OracleLog,
   type OracleMode,
   type OracleStateFile,
+  type OracleChat,
 } from '@/lib/api'
 
 const TERMINAL_STATUSES = new Set(['success', 'failure', 'cancelled'])
@@ -22,37 +23,57 @@ const MODES: { value: OracleMode; label: string; hint: string }[] = [
   { value: 'migrate', label: 'Migrate', hint: 'Ingest /data files into memories.' },
 ]
 
+type Selection =
+  | { kind: 'query'; id: string }
+  | { kind: 'chat'; id: string }
+  | null
+
+type ListTab = 'chats' | 'queries'
+
 export default function OracleDetailPage() {
   const params = useParams()
   const id = params.id as string
 
+  // ---- top-level data ----
   const [oracle, setOracle] = useState<Oracle | null>(null)
   const [queries, setQueries] = useState<OracleQuery[]>([])
+  const [chats, setChats] = useState<OracleChat[]>([])
   const [stateFiles, setStateFiles] = useState<OracleStateFile[]>([])
   const [error, setError] = useState<string | null>(null)
 
+  // ---- ui state ----
+  const [listTab, setListTab] = useState<ListTab>('chats')
+  const [selection, setSelection] = useState<Selection>(null)
+  const [selectedFile, setSelectedFile] = useState<string | null>(null)
+
+  // ---- dispatch form ----
   const [message, setMessage] = useState('')
   const [mode, setMode] = useState<OracleMode>('read')
   const [dispatching, setDispatching] = useState(false)
   const [dispatchError, setDispatchError] = useState<string | null>(null)
 
-  const [activeQueryId, setActiveQueryId] = useState<string | null>(null)
+  // ---- query detail (loaded when selection is { kind: 'query' }) ----
   const [activeQuery, setActiveQuery] = useState<OracleQuery | null>(null)
   const [logs, setLogs] = useState<OracleLog[]>([])
   const [expandedLogIds, setExpandedLogIds] = useState<Set<string>>(new Set())
 
-  const [selectedFile, setSelectedFile] = useState<string | null>(null)
+  // ---- chat thread (loaded when selection is { kind: 'chat' }) ----
+  const [activeChat, setActiveChat] = useState<OracleChat | null>(null)
+  const [chatMessages, setChatMessages] = useState<OracleQuery[]>([])
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const logScrollRef = useRef<HTMLDivElement>(null)
+  const detailScrollRef = useRef<HTMLDivElement>(null)
 
-  // Wall-clock tick so in-progress durations advance independently of the
-  // event poll. liveDuration() reads `now` to compute elapsed against
-  // startedAt for queries that are still running.
+  // Wall-clock tick so in-progress durations advance independently of the poll.
   const now = useNow(1000)
 
+  // ---- loaders ----
   const refreshQueries = useCallback(() => {
     oraclesApi.listQueries(id).then(setQueries).catch(() => {})
+  }, [id])
+
+  const refreshChats = useCallback(() => {
+    oraclesApi.listChats(id).then(setChats).catch(() => {})
   }, [id])
 
   const refreshState = useCallback(() => {
@@ -62,16 +83,18 @@ export default function OracleDetailPage() {
   useEffect(() => {
     oraclesApi.get(id).then(setOracle).catch(err => setError(err.message))
     refreshQueries()
+    refreshChats()
     refreshState()
-  }, [id, refreshQueries, refreshState])
+  }, [id, refreshQueries, refreshChats, refreshState])
 
-  // Auto-scroll log viewer
+  // Auto-scroll detail panel as new content arrives.
   useEffect(() => {
-    if (logScrollRef.current) {
-      logScrollRef.current.scrollTop = logScrollRef.current.scrollHeight
+    if (detailScrollRef.current) {
+      detailScrollRef.current.scrollTop = detailScrollRef.current.scrollHeight
     }
-  }, [logs])
+  }, [logs, chatMessages])
 
+  // ---- polling helpers ----
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
       clearInterval(pollRef.current)
@@ -96,28 +119,101 @@ export default function OracleDetailPage() {
             refreshState()
           }
         }
-      } catch {
-        // keep polling; transient errors
-      }
+      } catch { /* keep polling */ }
     }
     tick()
     pollRef.current = setInterval(tick, 1500)
   }, [id, refreshQueries, refreshState, stopPolling])
 
+  const pollChat = useCallback((chatId: string) => {
+    stopPolling()
+    const tick = async () => {
+      try {
+        const { chat, messages } = await oraclesApi.getChat(id, chatId)
+        setActiveChat(chat)
+        setChatMessages(messages)
+        // Stop polling once all messages are terminal.
+        if (messages.every(m => TERMINAL_STATUSES.has(m.status))) {
+          stopPolling()
+          refreshChats()
+          refreshQueries()
+          // Refresh state if any message was a write/migrate.
+          if (messages.some(m => m.status === 'success' && (m.mode === 'write' || m.mode === 'migrate'))) {
+            refreshState()
+          }
+        }
+      } catch { /* keep polling */ }
+    }
+    tick()
+    pollRef.current = setInterval(tick, 1500)
+  }, [id, refreshChats, refreshQueries, refreshState, stopPolling])
+
   useEffect(() => () => stopPolling(), [stopPolling])
 
-  const handleDispatch = async (e: React.FormEvent) => {
-    e.preventDefault()
-    const text = message.trim()
-    if ((!text && mode !== 'migrate') || dispatching) return
+  // ---- selection ----
+  const selectQuery = useCallback((q: OracleQuery) => {
+    // If this query is part of a chat, jump to the chat instead.
+    if (q.chatId) {
+      setSelection({ kind: 'chat', id: q.chatId })
+      return
+    }
+    setSelection({ kind: 'query', id: q.id })
+    setActiveQuery(q)
+    setLogs([])
+    if (TERMINAL_STATUSES.has(q.status)) {
+      stopPolling()
+      oraclesApi.listLogs(id, q.id).then(setLogs).catch(() => {})
+    } else {
+      pollQuery(q.id)
+    }
+  }, [id, pollQuery, stopPolling])
+
+  const selectChat = useCallback((chat: OracleChat) => {
+    setSelection({ kind: 'chat', id: chat.id })
+    setActiveChat(chat)
+    setChatMessages([])
+    pollChat(chat.id)
+  }, [pollChat])
+
+  // Switch detail loaders when selection changes externally (e.g. via promote).
+  useEffect(() => {
+    if (!selection) return
+    if (selection.kind === 'query') {
+      const q = queries.find(qq => qq.id === selection.id)
+      if (q) selectQuery(q)
+    } else if (selection.kind === 'chat') {
+      const c = chats.find(cc => cc.id === selection.id)
+      if (c) selectChat(c)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selection?.kind, selection?.id])
+
+  // ---- dispatch / chat actions ----
+  const handleSendInChat = async (text: string) => {
+    if (!selection || selection.kind !== 'chat') return
     setDispatching(true)
     setDispatchError(null)
     try {
-      const { queryId } = await oraclesApi.dispatch(id, text || '(migrate)', mode)
-      setActiveQueryId(queryId)
+      await oraclesApi.dispatch(id, text, { mode: 'chat', chatId: selection.id })
+      setMessage('')
+      pollChat(selection.id)
+      refreshChats()
+    } catch (err) {
+      setDispatchError(err instanceof Error ? err.message : 'Send failed')
+    } finally {
+      setDispatching(false)
+    }
+  }
+
+  const handleDispatchOneShot = async (text: string) => {
+    setDispatching(true)
+    setDispatchError(null)
+    try {
+      const { queryId } = await oraclesApi.dispatch(id, text || '(migrate)', { mode })
+      setMessage('')
+      setSelection({ kind: 'query', id: queryId })
       setActiveQuery(null)
       setLogs([])
-      setMessage('')
       pollQuery(queryId)
       refreshQueries()
     } catch (err) {
@@ -127,15 +223,40 @@ export default function OracleDetailPage() {
     }
   }
 
-  const handleSelectQuery = (q: OracleQuery) => {
-    setActiveQueryId(q.id)
-    setActiveQuery(q)
-    setLogs([])
-    if (TERMINAL_STATUSES.has(q.status)) {
-      stopPolling()
-      oraclesApi.listLogs(id, q.id).then(setLogs).catch(() => {})
+  const submitDispatch = (e: React.FormEvent) => {
+    e.preventDefault()
+    const text = message.trim()
+    if (selection?.kind === 'chat') {
+      if (!text) return
+      handleSendInChat(text)
     } else {
-      pollQuery(q.id)
+      if (!text && mode !== 'migrate') return
+      handleDispatchOneShot(text)
+    }
+  }
+
+  const handleNewChat = async () => {
+    try {
+      const chat = await oraclesApi.createChat(id)
+      refreshChats()
+      setListTab('chats')
+      setSelection({ kind: 'chat', id: chat.id })
+      setActiveChat(chat)
+      setChatMessages([])
+    } catch (err) {
+      setDispatchError(err instanceof Error ? err.message : 'New chat failed')
+    }
+  }
+
+  const handlePromoteToChat = async (queryId: string) => {
+    try {
+      const chat = await oraclesApi.promoteQueryToChat(id, queryId)
+      refreshChats()
+      refreshQueries()
+      setListTab('chats')
+      setSelection({ kind: 'chat', id: chat.id })
+    } catch (err) {
+      setDispatchError(err instanceof Error ? err.message : 'Promote failed')
     }
   }
 
@@ -143,7 +264,7 @@ export default function OracleDetailPage() {
     try {
       await oraclesApi.cancelQuery(id, queryId)
       refreshQueries()
-      if (activeQueryId === queryId) {
+      if (selection?.kind === 'query' && selection.id === queryId) {
         const q = await oraclesApi.getQuery(id, queryId)
         setActiveQuery(q)
       }
@@ -167,13 +288,28 @@ export default function OracleDetailPage() {
       const child = withContext
         ? await oraclesApi.continueQuery(id, queryId)
         : await oraclesApi.retryQuery(id, queryId)
-      setActiveQueryId(child.id)
+      setSelection({ kind: 'query', id: child.id })
       setActiveQuery(child)
       setLogs([])
       pollQuery(child.id)
       refreshQueries()
     } catch (err) {
       setDispatchError(err instanceof Error ? err.message : 'Retry failed')
+    }
+  }
+
+  const handleDeleteChat = async (chatId: string) => {
+    if (!confirm('Delete this chat? Messages stay in query history.')) return
+    try {
+      await oraclesApi.deleteChat(id, chatId)
+      refreshChats()
+      if (selection?.kind === 'chat' && selection.id === chatId) {
+        setSelection(null)
+        setActiveChat(null)
+        setChatMessages([])
+      }
+    } catch (err) {
+      setDispatchError(err instanceof Error ? err.message : 'Delete failed')
     }
   }
 
@@ -202,6 +338,7 @@ export default function OracleDetailPage() {
   }
 
   const selectedFileObj = stateFiles.find(f => f.name === selectedFile) ?? null
+  const standaloneQueries = queries.filter(q => !q.chatId)
 
   return (
     <div className="flex flex-col h-[calc(100vh-3.5rem)] bg-zinc-950">
@@ -216,18 +353,16 @@ export default function OracleDetailPage() {
           oracle.status === 'active' ? 'bg-green-900 text-green-200' :
           oracle.status === 'error' ? 'bg-red-900 text-red-200' :
           'bg-zinc-800 text-zinc-400'
-        }`}>
-          {oracle.status}
-        </span>
+        }`}>{oracle.status}</span>
         <span className="text-xs text-zinc-600 font-mono">{oracle.stateDir}</span>
         {!oracle.online && (
           <span className="ml-auto text-xs text-amber-400">offline — spawn the container</span>
         )}
       </div>
 
-      {/* Body — 3 columns */}
+      {/* Body */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left: state files */}
+        {/* State files */}
         <div className="w-[20rem] border-r border-zinc-800 flex flex-col">
           <div className="px-3 py-2 border-b border-zinc-800 flex items-center justify-between">
             <span className="text-xs uppercase tracking-wider text-zinc-500">State files</span>
@@ -245,9 +380,7 @@ export default function OracleDetailPage() {
                       className={`w-full text-left px-3 py-1.5 text-xs font-mono truncate ${
                         f.name === selectedFile ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-900'
                       }`}
-                    >
-                      {f.name}
-                    </button>
+                    >{f.name}</button>
                   </li>
                 ))}
               </ul>
@@ -266,49 +399,106 @@ export default function OracleDetailPage() {
           )}
         </div>
 
-        {/* Middle: query history */}
+        {/* List panel: tabs + list */}
         <div className="w-[22rem] border-r border-zinc-800 flex flex-col">
-          <div className="px-3 py-2 border-b border-zinc-800 flex items-center justify-between">
-            <span className="text-xs uppercase tracking-wider text-zinc-500">Queries ({queries.length})</span>
-            <button onClick={refreshQueries} className="text-xs text-zinc-500 hover:text-zinc-300">refresh</button>
+          <div className="px-3 py-2 border-b border-zinc-800 flex items-center gap-1">
+            <button
+              onClick={() => setListTab('chats')}
+              className={`text-xs px-2 py-1 rounded ${listTab === 'chats' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'}`}
+            >Chats ({chats.length})</button>
+            <button
+              onClick={() => setListTab('queries')}
+              className={`text-xs px-2 py-1 rounded ${listTab === 'queries' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'}`}
+            >Queries ({standaloneQueries.length})</button>
+            <div className="ml-auto flex items-center gap-1">
+              {listTab === 'chats' && (
+                <button
+                  onClick={handleNewChat}
+                  className="text-xs px-2 py-1 rounded bg-violet-900 hover:bg-violet-800 text-violet-100"
+                >+ New</button>
+              )}
+              <button
+                onClick={listTab === 'chats' ? refreshChats : refreshQueries}
+                className="text-xs text-zinc-500 hover:text-zinc-300"
+              >↻</button>
+            </div>
           </div>
+
           <div className="flex-1 overflow-y-auto">
-            {queries.length === 0 ? (
-              <p className="text-xs text-zinc-600 p-3">No queries yet.</p>
+            {listTab === 'chats' ? (
+              chats.length === 0 ? (
+                <p className="text-xs text-zinc-600 p-3">No chats yet. Start a new one or promote a query.</p>
+              ) : (
+                <ul>
+                  {chats.map(c => (
+                    <li key={c.id}>
+                      <button
+                        onClick={() => selectChat(c)}
+                        className={`w-full text-left px-3 py-2 border-b border-zinc-900 ${
+                          selection?.kind === 'chat' && selection.id === c.id ? 'bg-zinc-800' : 'hover:bg-zinc-900'
+                        }`}
+                      >
+                        <div className="text-xs text-zinc-200 line-clamp-1 mb-1">
+                          {c.title || '(untitled)'}
+                        </div>
+                        <div className="flex items-center gap-2 text-[10px] text-zinc-500 font-mono">
+                          <span>{relTime(c.lastMessageAt ?? c.createdAt)}</span>
+                          {c.claudeSessionId && <span title={c.claudeSessionId}>session {c.claudeSessionId.slice(0, 8)}</span>}
+                        </div>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )
             ) : (
-              <ul>
-                {queries.map(q => (
-                  <li key={q.id}>
-                    <button
-                      onClick={() => handleSelectQuery(q)}
-                      className={`w-full text-left px-3 py-2 border-b border-zinc-900 ${
-                        activeQueryId === q.id ? 'bg-zinc-800' : 'hover:bg-zinc-900'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2 mb-1">
-                        <StatusBadge status={q.status} />
-                        <span className="text-xs uppercase tracking-wider text-zinc-500">{q.mode}</span>
-                        <span className="text-xs text-zinc-600 ml-auto">{relTime(q.createdAt)}</span>
-                      </div>
-                      <p className="text-xs text-zinc-300 line-clamp-2 mb-1">{q.message || '(empty)'}</p>
-                      <div className="flex items-center gap-3 text-[10px] text-zinc-500 font-mono">
-                        <span>{liveDuration(q, now) ?? '—'}</span>
-                        <span>{q.totalCostUsd != null ? `$${q.totalCostUsd.toFixed(4)}` : '—'}</span>
-                        {tokensSummary(q) && (
-                          <span className="text-zinc-600">{tokensSummary(q)}</span>
-                        )}
-                      </div>
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              standaloneQueries.length === 0 ? (
+                <p className="text-xs text-zinc-600 p-3">No standalone queries. Try dispatching one below.</p>
+              ) : (
+                <ul>
+                  {standaloneQueries.map(q => (
+                    <li key={q.id}>
+                      <button
+                        onClick={() => selectQuery(q)}
+                        className={`w-full text-left px-3 py-2 border-b border-zinc-900 ${
+                          selection?.kind === 'query' && selection.id === q.id ? 'bg-zinc-800' : 'hover:bg-zinc-900'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 mb-1">
+                          <StatusBadge status={q.status} />
+                          <span className="text-xs uppercase tracking-wider text-zinc-500">{q.mode}</span>
+                          <span className="text-xs text-zinc-600 ml-auto">{relTime(q.createdAt)}</span>
+                        </div>
+                        <p className="text-xs text-zinc-300 line-clamp-2 mb-1">{q.message || '(empty)'}</p>
+                        <div className="flex items-center gap-3 text-[10px] text-zinc-500 font-mono">
+                          <span>{liveDuration(q, now) ?? '—'}</span>
+                          <span>{q.totalCostUsd != null ? `$${q.totalCostUsd.toFixed(4)}` : '—'}</span>
+                          {tokensSummary(q) && <span className="text-zinc-600">{tokensSummary(q)}</span>}
+                        </div>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )
             )}
           </div>
         </div>
 
-        {/* Right: active query detail + dispatch form */}
+        {/* Detail panel */}
         <div className="flex-1 flex flex-col">
-          {activeQuery ? (
+          {selection?.kind === 'chat' && activeChat ? (
+            <ChatThread
+              chat={activeChat}
+              messages={chatMessages}
+              now={now}
+              onDelete={() => handleDeleteChat(activeChat.id)}
+              onRenameTitle={async (title) => {
+                await oraclesApi.updateChatTitle(id, activeChat.id, title)
+                refreshChats()
+                setActiveChat({ ...activeChat, title })
+              }}
+              detailScrollRef={detailScrollRef}
+            />
+          ) : selection?.kind === 'query' && activeQuery ? (
             <ActiveQueryView
               oracleId={id}
               query={activeQuery}
@@ -318,50 +508,70 @@ export default function OracleDetailPage() {
               onCancel={() => handleCancel(activeQuery.id)}
               onApprove={() => handleApprove(activeQuery.id)}
               onRetry={(withContext) => handleRetry(activeQuery.id, withContext)}
-              logScrollRef={logScrollRef}
+              onPromoteToChat={() => handlePromoteToChat(activeQuery.id)}
+              detailScrollRef={detailScrollRef}
               now={now}
             />
           ) : (
-            <div className="flex-1 flex items-center justify-center text-zinc-600 text-sm">
-              Pick a query, or dispatch a new one below.
+            <div className="flex-1 flex items-center justify-center text-zinc-600 text-sm text-center px-6">
+              <div>
+                <p>Pick a chat or query, start a new chat, or dispatch one-off below.</p>
+                <p className="text-xs text-zinc-700 mt-2">Chats keep cache + session warm across messages — useful for follow-ups.</p>
+              </div>
             </div>
           )}
 
-          <form onSubmit={handleDispatch} className="border-t border-zinc-800 p-3 space-y-2">
+          <form onSubmit={submitDispatch} className="border-t border-zinc-800 p-3 space-y-2">
             <div className="flex items-center gap-2">
-              <span className="text-xs uppercase tracking-wider text-zinc-500">mode</span>
-              <select
-                value={mode}
-                onChange={e => setMode(e.target.value as OracleMode)}
-                className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm"
-              >
-                {MODES.map(m => (
-                  <option key={m.value} value={m.value}>{m.label}</option>
-                ))}
-              </select>
-              <span className="text-xs text-zinc-500">{MODES.find(m => m.value === mode)?.hint}</span>
+              {selection?.kind === 'chat' ? (
+                <span className="text-xs uppercase tracking-wider text-violet-400">chat</span>
+              ) : (
+                <>
+                  <span className="text-xs uppercase tracking-wider text-zinc-500">mode</span>
+                  <select
+                    value={mode}
+                    onChange={e => setMode(e.target.value as OracleMode)}
+                    className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm"
+                  >
+                    {MODES.map(m => (
+                      <option key={m.value} value={m.value}>{m.label}</option>
+                    ))}
+                  </select>
+                  <span className="text-xs text-zinc-500">{MODES.find(m => m.value === mode)?.hint}</span>
+                </>
+              )}
+              {selection?.kind === 'chat' && (
+                <span className="text-xs text-zinc-500 ml-auto">
+                  {activeChat?.claudeSessionId ? `Resumes session ${activeChat.claudeSessionId.slice(0, 8)}` : 'New session — first message creates it'}
+                </span>
+              )}
             </div>
             <textarea
               value={message}
               onChange={e => setMessage(e.target.value)}
               placeholder={
+                selection?.kind === 'chat' ? 'Send a message...' :
                 mode === 'read' ? 'Ask the oracle...' :
                 mode === 'write' ? 'New information to merge into memories...' :
                 'Migrate runs without a message — files in /data drive it.'
               }
-              disabled={dispatching || mode === 'migrate' && false}
+              disabled={dispatching}
               rows={3}
               className="w-full bg-zinc-900 border border-zinc-700 rounded px-3 py-2 text-sm font-mono resize-none"
               onKeyDown={e => {
                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-                  handleDispatch(e as unknown as React.FormEvent)
+                  submitDispatch(e as unknown as React.FormEvent)
                 }
               }}
             />
             {dispatchError && <p className="text-xs text-red-400">{dispatchError}</p>}
             <div className="flex items-center gap-2">
-              <Button type="submit" disabled={dispatching || (!message.trim() && mode !== 'migrate') || !oracle.online} size="sm">
-                {dispatching ? 'Dispatching...' : oracle.online ? 'Dispatch' : 'Oracle offline'}
+              <Button
+                type="submit"
+                disabled={dispatching || (!message.trim() && (selection?.kind === 'chat' || mode !== 'migrate')) || !oracle.online}
+                size="sm"
+              >
+                {dispatching ? 'Sending...' : !oracle.online ? 'Oracle offline' : selection?.kind === 'chat' ? 'Send' : 'Dispatch'}
               </Button>
               <span className="text-xs text-zinc-600">Ctrl+Enter</span>
             </div>
@@ -373,11 +583,115 @@ export default function OracleDetailPage() {
 }
 
 // ---------------------------------------------------------------------------
-// Active query view
+// Chat thread view
+// ---------------------------------------------------------------------------
+
+function ChatThread({
+  chat, messages, now, onDelete, onRenameTitle, detailScrollRef,
+}: {
+  chat: OracleChat
+  messages: OracleQuery[]
+  now: number
+  onDelete: () => void
+  onRenameTitle: (title: string) => Promise<void>
+  detailScrollRef: React.RefObject<HTMLDivElement | null>
+}) {
+  const [editing, setEditing] = useState(false)
+  const [titleDraft, setTitleDraft] = useState(chat.title || '')
+  useEffect(() => { setTitleDraft(chat.title || '') }, [chat.title])
+
+  const totalCost = messages.reduce((s, m) => s + (m.totalCostUsd ?? 0), 0)
+
+  return (
+    <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="px-4 py-3 border-b border-zinc-800 flex items-center gap-3">
+        {editing ? (
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault()
+              await onRenameTitle(titleDraft.trim() || 'Chat')
+              setEditing(false)
+            }}
+            className="flex-1 flex items-center gap-2"
+          >
+            <input
+              value={titleDraft}
+              onChange={e => setTitleDraft(e.target.value)}
+              autoFocus
+              className="flex-1 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm"
+            />
+            <Button type="submit" size="sm">Save</Button>
+            <Button type="button" size="sm" variant="outline" onClick={() => setEditing(false)}>Cancel</Button>
+          </form>
+        ) : (
+          <>
+            <h2 className="text-sm font-semibold text-zinc-200 flex-1 truncate">{chat.title || '(untitled chat)'}</h2>
+            <button onClick={() => setEditing(true)} className="text-xs text-zinc-500 hover:text-zinc-300">rename</button>
+            <button onClick={onDelete} className="text-xs text-red-500 hover:text-red-300">delete</button>
+          </>
+        )}
+      </div>
+
+      <div className="px-4 py-2 border-b border-zinc-900 flex items-center gap-4 text-xs text-zinc-500">
+        <span>{messages.length} message{messages.length === 1 ? '' : 's'}</span>
+        {totalCost > 0 && <span>total cost ${totalCost.toFixed(4)}</span>}
+        {chat.claudeSessionId && (
+          <span className="font-mono ml-auto" title={chat.claudeSessionId}>session {chat.claudeSessionId.slice(0, 8)}</span>
+        )}
+      </div>
+
+      <div ref={detailScrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
+        {messages.length === 0 && (
+          <p className="text-center text-zinc-600 text-sm py-12">No messages yet. Send one below.</p>
+        )}
+        {messages.map(m => (
+          <ChatMessage key={m.id} message={m} now={now} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function ChatMessage({ message, now }: { message: OracleQuery; now: number }) {
+  return (
+    <div className="space-y-1">
+      {/* User bubble */}
+      <div className="flex">
+        <div className="ml-auto max-w-[70%] bg-zinc-800 rounded-lg px-3 py-2">
+          <pre className="text-sm text-zinc-100 whitespace-pre-wrap font-sans">{message.message}</pre>
+        </div>
+      </div>
+      {/* Assistant bubble */}
+      <div className="flex">
+        <div className="mr-auto max-w-[85%] rounded-lg px-3 py-2 bg-zinc-900 border border-zinc-800">
+          <div className="flex items-center gap-2 mb-1 text-[10px] text-zinc-500">
+            <StatusBadge status={message.status} />
+            <span>{liveDuration(message, now) ?? '...'}</span>
+            {message.totalCostUsd != null && <span>${message.totalCostUsd.toFixed(4)}</span>}
+            {tokensSummary(message) && <span className="text-zinc-600">{tokensSummary(message)}</span>}
+            {message.stopReason && <span className="text-zinc-600">{message.stopReason}</span>}
+          </div>
+          {message.status === 'running' && !message.response ? (
+            <p className="text-sm text-zinc-500 italic">thinking...</p>
+          ) : message.errorMessage ? (
+            <pre className="text-sm text-red-300 whitespace-pre-wrap font-mono">{message.errorMessage}</pre>
+          ) : (
+            <div className="prose prose-invert prose-sm max-w-none">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.response || ''}</ReactMarkdown>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// One-off query view (existing — extended with promote-to-chat)
 // ---------------------------------------------------------------------------
 
 function ActiveQueryView({
-  query, logs, expandedLogIds, onToggleExpand, onCancel, onApprove, onRetry, logScrollRef, now,
+  query, logs, expandedLogIds, onToggleExpand, onCancel, onApprove, onRetry, onPromoteToChat, detailScrollRef, now,
 }: {
   oracleId: string
   query: OracleQuery
@@ -387,11 +701,10 @@ function ActiveQueryView({
   onCancel: () => void
   onApprove: () => void
   onRetry: (withContext: boolean) => void
-  logScrollRef: React.RefObject<HTMLDivElement | null>
+  onPromoteToChat: () => void
+  detailScrollRef: React.RefObject<HTMLDivElement | null>
   now: number
 }) {
-  // Collapse old events on terminal runs so the section doesn't dominate
-  // the page; show last 10 by default with a toggle to reveal everything.
   const isTerminal = query.status === 'success' || query.status === 'failure' || query.status === 'cancelled'
   const [showAllLogs, setShowAllLogs] = useState(false)
   const visibleLogs = !isTerminal || showAllLogs ? logs : logs.slice(-10)
@@ -401,10 +714,10 @@ function ActiveQueryView({
   const tokensOut = usage.output_tokens
   const cacheRead = usage.cache_read_input_tokens
   const cacheWrite = usage.cache_creation_input_tokens
+  const canPromote = query.status === 'success' && !!query.sessionId && !query.chatId
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      {/* Query header */}
       <div className="px-4 py-3 border-b border-zinc-800 space-y-2">
         <div className="flex items-center gap-3 flex-wrap">
           <StatusBadge status={query.status} />
@@ -415,6 +728,9 @@ function ActiveQueryView({
             <span className="text-xs text-amber-400">retry of {query.parentQueryId.slice(0, 8)}</span>
           )}
           <div className="ml-auto flex items-center gap-2">
+            {canPromote && (
+              <Button onClick={onPromoteToChat} size="sm" variant="outline">Continue as chat</Button>
+            )}
             {query.status === 'pending' && (
               <Button onClick={onApprove} size="sm" variant="default">Approve</Button>
             )}
@@ -430,7 +746,6 @@ function ActiveQueryView({
           </div>
         </div>
 
-        {/* Metadata grid */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-1 text-xs">
           <Meta label="model" value={query.model} />
           <Meta label="cost" value={query.totalCostUsd != null ? `$${query.totalCostUsd.toFixed(4)}` : null} />
@@ -447,8 +762,7 @@ function ActiveQueryView({
         </div>
       </div>
 
-      {/* Tabs: message | response | logs */}
-      <div className="flex-1 overflow-y-auto" ref={logScrollRef}>
+      <div className="flex-1 overflow-y-auto" ref={detailScrollRef}>
         <Section title="Message">
           <pre className="text-sm text-zinc-300 whitespace-pre-wrap font-mono">{query.message || '(empty)'}</pre>
         </Section>
@@ -482,17 +796,13 @@ function ActiveQueryView({
                 <button
                   onClick={() => setShowAllLogs(true)}
                   className="text-xs text-zinc-500 hover:text-zinc-300 mb-2"
-                >
-                  ▸ show {hiddenCount} earlier event{hiddenCount === 1 ? '' : 's'}
-                </button>
+                >▸ show {hiddenCount} earlier event{hiddenCount === 1 ? '' : 's'}</button>
               )}
               {showAllLogs && isTerminal && logs.length > 10 && (
                 <button
                   onClick={() => setShowAllLogs(false)}
                   className="text-xs text-zinc-500 hover:text-zinc-300 mb-2"
-                >
-                  ▾ collapse to last 10
-                </button>
+                >▾ collapse to last 10</button>
               )}
               <ul className="space-y-1">
                 {visibleLogs.map(log => (
@@ -643,9 +953,6 @@ function useNow(intervalMs: number = 1000): number {
   return now
 }
 
-// Resolve a query's duration to display: completed runs use durationMs;
-// running runs compute against the wall-clock tick so the value advances
-// every second without waiting for the next poll.
 function liveDuration(query: OracleQuery, now: number): string | null {
   if (query.durationMs != null) return formatDuration(query.durationMs)
   if (query.status === 'running' && query.startedAt) {

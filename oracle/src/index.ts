@@ -59,7 +59,7 @@ function logErr(msg: string, extra?: unknown) {
 // Prompt templates per mode
 // ---------------------------------------------------------------------------
 
-type Mode = 'read' | 'write' | 'migrate';
+type Mode = 'read' | 'write' | 'migrate' | 'chat';
 
 const SYSTEM_PROMPT = `You are a knowledge oracle. Your memories live as markdown files at this absolute path:
 
@@ -123,6 +123,19 @@ New information to integrate:
 ${newData}`;
 }
 
+function buildChatPrompt(message: string): string {
+  return `You're in chat mode. Multiple turns may follow within the same session, so the user can drill in or pivot.
+
+Defaults:
+- Treat each message as a question or follow-up unless the user explicitly says to save/update.
+- Read /home/agent/.claude/projects/-workspace/memory/ as needed (start with index.md if you don't have a current map of memories).
+- If the user asks you to write or update memory: do it, then briefly confirm what changed.
+- Don't repeat content you've already shown earlier in this session unless asked. The user can see scrollback.
+- Be conversational and dense — no preamble, no "great question".
+
+User: ${message}`;
+}
+
 function buildMigratePrompt(): string {
   return `Migrate staged data files into your structured memories.
 
@@ -147,6 +160,7 @@ Key rules:
 function buildPrompt(mode: Mode, payload: string): string {
   if (mode === 'read') return buildReadPrompt(payload);
   if (mode === 'write') return buildWritePrompt(payload);
+  if (mode === 'chat') return buildChatPrompt(payload);
   return buildMigratePrompt();
 }
 
@@ -159,6 +173,7 @@ interface DispatchMessage {
   runId: string;
   mode: Mode;
   payload: string;
+  sessionId?: string | null;
 }
 
 type IncomingMessage = DispatchMessage | { type: string; [k: string]: unknown };
@@ -268,8 +283,8 @@ class OracleClient {
   }
 
   private async handleDispatch(msg: DispatchMessage): Promise<void> {
-    const { runId, mode, payload } = msg;
-    log(`Dispatch runId=${runId} mode=${mode}`);
+    const { runId, mode, payload, sessionId } = msg;
+    log(`Dispatch runId=${runId} mode=${mode}${sessionId ? ` resume=${sessionId.slice(0, 8)}` : ''}`);
 
     if (this.currentRun) {
       logErr(`Rejecting dispatch; run ${this.currentRun.runId} already in progress`);
@@ -296,7 +311,7 @@ class OracleClient {
     this.send({ type: 'run_update', runId, status: 'running' });
 
     const prompt = buildPrompt(mode, payload);
-    const { exitCode, finalAssistantText, errorText } = await this.runClaude(runId, prompt);
+    const { exitCode, finalAssistantText, errorText } = await this.runClaude(runId, prompt, sessionId ?? null);
 
     if (exitCode !== 0) {
       this.send({
@@ -321,6 +336,7 @@ class OracleClient {
   private runClaude(
     runId: string,
     prompt: string,
+    resumeSessionId: string | null,
   ): Promise<{ exitCode: number; finalAssistantText: string; errorText: string }> {
     return new Promise((resolve) => {
       const args = [
@@ -330,6 +346,7 @@ class OracleClient {
         '--output-format', 'stream-json',
         '--max-turns', String(this.config.maxTurns),
         '--system-prompt', SYSTEM_PROMPT,
+        ...(resumeSessionId ? ['--resume', resumeSessionId] : []),
         ...(this.config.model ? ['--model', this.config.model] : []),
       ];
 

@@ -157,6 +157,17 @@ export interface DbOracleQuery {
   trailer: Record<string, unknown> | string | null
   resume_context: string | null
   parent_query_id: string | null
+  chat_id: string | null
+  created_at: Date
+  updated_at: Date
+}
+
+export interface DbOracleChat {
+  id: string
+  oracle_id: string
+  title: string | null
+  claude_session_id: string | null
+  last_message_at: Date | null
   created_at: Date
   updated_at: Date
 }

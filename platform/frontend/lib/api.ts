@@ -413,7 +413,7 @@ export interface Oracle {
   createdAt: string
   updatedAt: string
 }
-export type OracleMode = 'read' | 'write' | 'migrate'
+export type OracleMode = 'read' | 'write' | 'migrate' | 'chat'
 export interface OracleQuery {
   id: string
   oracleId: string
@@ -434,6 +434,16 @@ export interface OracleQuery {
   trailer: Record<string, unknown> | null
   resumeContext: string | null
   parentQueryId: string | null
+  chatId: string | null
+  createdAt: string
+  updatedAt: string
+}
+export interface OracleChat {
+  id: string
+  oracleId: string
+  title: string | null
+  claudeSessionId: string | null
+  lastMessageAt: string | null
   createdAt: string
   updatedAt: string
 }
@@ -455,11 +465,27 @@ export const oraclesApi = {
   // Page UI uses dispatch + stream instead.
   query: (id: string, message: string) =>
     fetchAPI<{ response: string }>(`/oracles/${id}/query`, { method: 'POST', body: JSON.stringify({ message }) }),
-  dispatch: (id: string, message: string, mode: OracleMode = 'read', autoApprove = true) =>
-    fetchAPI<{ queryId: string; status: OracleQuery['status']; mode: OracleMode; pending: boolean }>(
+  dispatch: (
+    id: string,
+    message: string,
+    opts: { mode?: OracleMode; autoApprove?: boolean; chatId?: string } = {}
+  ) =>
+    fetchAPI<{ queryId: string; status: OracleQuery['status']; mode: OracleMode; pending: boolean; chatId: string | null }>(
       `/oracles/${id}/dispatch`,
-      { method: 'POST', body: JSON.stringify({ message, mode, autoApprove }) }
+      { method: 'POST', body: JSON.stringify({ message, mode: opts.mode ?? 'read', autoApprove: opts.autoApprove ?? true, chatId: opts.chatId }) }
     ),
+  // Chats
+  createChat: (id: string, title?: string) =>
+    fetchAPI<OracleChat>(`/oracles/${id}/chats`, { method: 'POST', body: JSON.stringify({ title }) }),
+  promoteQueryToChat: (id: string, queryId: string) =>
+    fetchAPI<OracleChat>(`/oracles/${id}/queries/${queryId}/promote-to-chat`, { method: 'POST' }),
+  listChats: (id: string) => fetchAPI<OracleChat[]>(`/oracles/${id}/chats`),
+  getChat: (id: string, chatId: string) =>
+    fetchAPI<{ chat: OracleChat; messages: OracleQuery[] }>(`/oracles/${id}/chats/${chatId}`),
+  updateChatTitle: (id: string, chatId: string, title: string | null) =>
+    fetchAPI<OracleChat>(`/oracles/${id}/chats/${chatId}`, { method: 'PATCH', body: JSON.stringify({ title }) }),
+  deleteChat: (id: string, chatId: string) =>
+    fetchAPI<void>(`/oracles/${id}/chats/${chatId}`, { method: 'DELETE' }),
   approveQuery: (id: string, queryId: string) =>
     fetchAPI<OracleQuery>(`/oracles/${id}/queries/${queryId}/approve`, { method: 'POST' }),
   cancelQuery: (id: string, queryId: string) =>
