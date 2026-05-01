@@ -25,4 +25,11 @@ runuser -u agent -- git config --global user.email "developer@agentforge.local"
 runuser -u agent -- git config --global user.name "AgentForge Developer"
 runuser -u agent -- git config --global --add safe.directory /workspace
 
+# Fix ownership on the persistent claude memory/session mount. The
+# spawner creates these dirs as uid 10001 on the host, but the agent
+# user inside the container is uid 1000 — without this, claude can't
+# write its memory files or session JSONLs.
+mkdir -p /home/agent/.claude/projects/-workspace/memory
+chown -R agent:agent /home/agent/.claude || true
+
 exec runuser -u agent -- "$@"

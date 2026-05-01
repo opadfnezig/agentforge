@@ -14,7 +14,10 @@ RUN npx tsc
 # CLI can write cache/debug/projects subdirs into.
 RUN mkdir -p /home/agent/.claude /workspace/results && chown -R agent:agent /app /home/agent/.claude /workspace/results
 
-USER agent
+COPY entrypoint.sh /usr/local/bin/researcher-entrypoint.sh
+RUN chmod +x /usr/local/bin/researcher-entrypoint.sh
+
 WORKDIR /workspace
 
+ENTRYPOINT ["/usr/local/bin/researcher-entrypoint.sh"]
 CMD ["node", "/app/dist/index.js"]
