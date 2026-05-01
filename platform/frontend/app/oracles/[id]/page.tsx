@@ -664,11 +664,12 @@ function ChatMessage({ message, now }: { message: OracleQuery; now: number }) {
       {/* Assistant bubble */}
       <div className="flex">
         <div className="mr-auto max-w-[85%] rounded-lg px-3 py-2 bg-zinc-900 border border-zinc-800">
-          <div className="flex items-center gap-2 mb-1 text-[10px] text-zinc-500">
+          <div className="flex items-center gap-2 mb-1 text-[10px] text-zinc-500 flex-wrap">
             <StatusBadge status={message.status} />
             <span>{liveDuration(message, now) ?? '...'}</span>
             {message.totalCostUsd != null && <span>${message.totalCostUsd.toFixed(4)}</span>}
             {tokensSummary(message) && <span className="text-zinc-600">{tokensSummary(message)}</span>}
+            {cacheSummary(message) && <span className="text-zinc-600">{cacheSummary(message)}</span>}
             {message.stopReason && <span className="text-zinc-600">{message.stopReason}</span>}
           </div>
           {message.status === 'running' && !message.response ? (
@@ -969,4 +970,13 @@ function tokensSummary(query: OracleQuery): string | null {
   const inS = inT != null ? `${(inT / 1000).toFixed(1)}k` : '?'
   const outS = outT != null ? `${(outT / 1000).toFixed(1)}k` : '?'
   return `↑${inS} ↓${outS}`
+}
+
+function cacheSummary(query: OracleQuery): string | null {
+  const usage = (query.trailer?.usage ?? {}) as Record<string, number | undefined>
+  const read = usage.cache_read_input_tokens
+  const write = usage.cache_creation_input_tokens
+  if (!read && !write) return null
+  const fmt = (n: number | undefined) => n ? (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`) : '0'
+  return `cache W${fmt(write)} R${fmt(read)}`
 }
