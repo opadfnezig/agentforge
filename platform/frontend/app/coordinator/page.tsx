@@ -5,7 +5,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Button } from '@/components/ui/button'
 import { useToast } from '@/components/ui/toaster'
-import { developersApi, spawnersApi, type DeveloperRun, type Spawn } from '@/lib/api'
+import { developersApi, researchersApi, spawnersApi, type DeveloperRun, type ResearcherRun, type Spawn } from '@/lib/api'
 
 interface Chat {
   id: string
@@ -27,6 +27,14 @@ interface DispatchInfo {
   runId: string
   instructions: string
   queued: boolean
+  pending?: boolean
+}
+
+interface ResearchInfo {
+  researcher: string
+  researcherId: string
+  runId: string
+  instructions: string
   pending?: boolean
 }
 
@@ -60,6 +68,7 @@ interface Message {
   content: string
   oracles?: OracleResponse[]
   dispatches?: DispatchInfo[]
+  researches?: ResearchInfo[]
   reads?: ReadInfo[]
   spawns?: SpawnInfo[]
   status?: string
@@ -136,6 +145,11 @@ export default function CoordinatorPage() {
         if (dispatchMatch) {
           try { dispatches = JSON.parse(dispatchMatch[1]) as DispatchInfo[] } catch { /* ignore */ }
         }
+        let researches: ResearchInfo[] | undefined
+        const researchMatch = content.match(/<!--RESEARCHES:([\s\S]*?):RESEARCHES-->/)
+        if (researchMatch) {
+          try { researches = JSON.parse(researchMatch[1]) as ResearchInfo[] } catch { /* ignore */ }
+        }
         const readMatch = content.match(/<!--READS:([\s\S]*?):READS-->/)
         if (readMatch) {
           try { reads = JSON.parse(readMatch[1]) as ReadInfo[] } catch { /* ignore */ }
@@ -148,9 +162,10 @@ export default function CoordinatorPage() {
         content = content
           .replace(/\n*<!--ORACLES:[\s\S]*?:ORACLES-->\s*/g, '')
           .replace(/\n*<!--DISPATCHES:[\s\S]*?:DISPATCHES-->\s*/g, '')
+          .replace(/\n*<!--RESEARCHES:[\s\S]*?:RESEARCHES-->\s*/g, '')
           .replace(/\n*<!--READS:[\s\S]*?:READS-->\s*/g, '')
           .replace(/\n*<!--SPAWNS:[\s\S]*?:SPAWNS-->\s*/g, '')
-        return { id: m.id, role: 'assistant', content, oracles, dispatches, reads, spawns }
+        return { id: m.id, role: 'assistant', content, oracles, dispatches, researches, reads, spawns }
       })
       setMessages(restored)
       setActiveChatId(id)
@@ -337,6 +352,7 @@ export default function CoordinatorPage() {
       accText: string
       accOracles: OracleResponse[]
       accDispatches: DispatchInfo[]
+      accResearches: ResearchInfo[]
       accReads: ReadInfo[]
       accSpawns: SpawnInfo[]
     },
@@ -348,6 +364,7 @@ export default function CoordinatorPage() {
     let accText = seed.accText
     let accOracles = seed.accOracles
     let accDispatches = seed.accDispatches
+    let accResearches = seed.accResearches
     let accReads = seed.accReads
     let accSpawns = seed.accSpawns
     let currentStatus = ''
@@ -369,6 +386,7 @@ export default function CoordinatorPage() {
             content: accText,
             oracles: accOracles,
             dispatches: accDispatches,
+            researches: accResearches,
             reads: accReads,
             spawns: accSpawns,
             status: currentStatus,
@@ -430,6 +448,18 @@ export default function CoordinatorPage() {
               : event.queued
               ? `Queued for ${event.developer}`
               : `Dispatched to ${event.developer}`
+            schedule()
+          } else if (event.type === 'research') {
+            accResearches = [...accResearches, {
+              researcher: event.researcher,
+              researcherId: event.researcherId,
+              runId: event.runId,
+              instructions: event.instructions,
+              pending: !!event.pending,
+            }]
+            currentStatus = event.pending
+              ? `Awaiting approval: research by ${event.researcher}`
+              : `Research dispatched to ${event.researcher}`
             schedule()
           } else if (event.type === 'read') {
             accReads = [...accReads, {
@@ -513,6 +543,7 @@ export default function CoordinatorPage() {
         accText: '',
         accOracles: [],
         accDispatches: [],
+        accResearches: [],
         accReads: [],
         accSpawns: [],
       })
@@ -546,6 +577,7 @@ export default function CoordinatorPage() {
       accText: string
       accOracles: OracleResponse[]
       accDispatches: DispatchInfo[]
+      accResearches: ResearchInfo[]
       accReads: ReadInfo[]
       accSpawns: SpawnInfo[]
     } | null = null
@@ -557,6 +589,7 @@ export default function CoordinatorPage() {
         accText: m.content,
         accOracles: m.oracles ?? [],
         accDispatches: m.dispatches ?? [],
+        accResearches: m.researches ?? [],
         accReads: m.reads ?? [],
         accSpawns: m.spawns ?? [],
       }
@@ -762,6 +795,15 @@ const MessageRow = memo(function MessageRow({ message: msg, isLast, loading, onR
         <div className="mb-2 space-y-1">
           {msg.dispatches.map((d) => (
             <DispatchBadge key={d.runId} dispatch={d} />
+          ))}
+        </div>
+      )}
+
+      {/* Research badges — coordinator emitted a [research, ...] block */}
+      {msg.researches && msg.researches.length > 0 && (
+        <div className="mb-2 space-y-1">
+          {msg.researches.map((r) => (
+            <ResearchBadge key={r.runId} research={r} />
           ))}
         </div>
       )}
@@ -1361,6 +1403,148 @@ const DispatchBadge = memo(function DispatchBadge({ dispatch }: { dispatch: Disp
               </pre>
             </details>
           )}
+        </div>
+      </div>
+    </details>
+  )
+})
+
+// Renders a single [research, ...] command emitted by the assistant.
+// Same approval/cancel/retry/continue lifecycle as DispatchBadge, but
+// against researcher runs (no modes, no git push status).
+const RESEARCH_TERMINAL_STATUSES = new Set<ResearcherRun['status']>(['success', 'failure', 'cancelled'])
+const ResearchBadge = memo(function ResearchBadge({ research }: { research: ResearchInfo }) {
+  const [run, setRun] = useState<ResearcherRun | null>(null)
+  const [now, setNow] = useState<number>(() => Date.now())
+  const [actionBusy, setActionBusy] = useState<null | 'approve' | 'cancel' | 'retry' | 'continue'>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const [liveChildExists, setLiveChildExists] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const tick = async () => {
+      try {
+        const r = await researchersApi.getRun(research.researcherId, research.runId)
+        if (cancelled) return
+        setRun(r)
+        if (!RESEARCH_TERMINAL_STATUSES.has(r.status)) {
+          timer = setTimeout(tick, 1500)
+        }
+      } catch {
+        if (!cancelled) timer = setTimeout(tick, 3000)
+      }
+    }
+    tick()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [research.researcherId, research.runId])
+
+  useEffect(() => {
+    if (!run) return
+    if (RESEARCH_TERMINAL_STATUSES.has(run.status)) return
+    if (run.status !== 'running') return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [run])
+
+  const status = run?.status ?? (research.pending ? 'pending' : 'queued')
+  const isTerminal = RESEARCH_TERMINAL_STATUSES.has(status as ResearcherRun['status'])
+  const isPending = status === 'pending'
+  const startedAt = run?.startedAt ? new Date(run.startedAt).getTime() : null
+  const finishedAt = run?.finishedAt ? new Date(run.finishedAt).getTime() : null
+  const elapsed = startedAt ? ((finishedAt ?? now) - startedAt) : null
+
+  const statusColor: Record<string, string> = {
+    pending: 'text-amber-400',
+    queued: 'text-zinc-400',
+    running: 'text-yellow-400',
+    success: 'text-green-400',
+    failure: 'text-red-400',
+    cancelled: 'text-zinc-400',
+  }
+
+  const approve = async () => {
+    setActionBusy('approve'); setActionError(null)
+    try { setRun(await researchersApi.approveRun(research.researcherId, research.runId)) }
+    catch (err) { setActionError(err instanceof Error ? err.message : 'Approve failed') }
+    finally { setActionBusy(null) }
+  }
+  const cancel = async () => {
+    if (!confirm('Cancel this research? This cannot be undone.')) return
+    setActionBusy('cancel'); setActionError(null)
+    try { setRun(await researchersApi.cancelRun(research.researcherId, research.runId)) }
+    catch (err) { setActionError(err instanceof Error ? err.message : 'Cancel failed') }
+    finally { setActionBusy(null) }
+  }
+  const retryOrContinue = async (kind: 'retry' | 'continue') => {
+    setActionBusy(kind); setActionError(null)
+    try {
+      const apiCall = kind === 'retry' ? researchersApi.retryRun : researchersApi.continueRun
+      await apiCall(research.researcherId, research.runId)
+      setLiveChildExists(true)
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : `${kind} failed`)
+    } finally { setActionBusy(null) }
+  }
+
+  return (
+    <details className="bg-zinc-900 border border-zinc-800 rounded text-xs">
+      <summary className="px-3 py-1.5 cursor-pointer text-zinc-400 hover:text-zinc-200 flex items-center gap-2 flex-wrap">
+        <span>Research:</span>
+        <span className="font-mono text-emerald-400">{research.researcher}</span>
+        <span className={`font-medium ${statusColor[status] ?? 'text-zinc-400'}`}>{status}</span>
+        {elapsed != null && <span className="text-zinc-500">{Math.round(elapsed / 1000)}s</span>}
+        {run?.totalCostUsd != null && <span className="text-zinc-500">${run.totalCostUsd.toFixed(4)}</span>}
+        <span className="ml-auto font-mono text-zinc-600">{research.runId.slice(0, 8)}</span>
+      </summary>
+      <div className="border-t border-zinc-800 px-3 py-2 space-y-2 max-h-[60vh] overflow-y-auto">
+        <div>
+          <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Instructions</div>
+          <pre className="text-zinc-300 whitespace-pre-wrap break-words font-mono text-[11px]">{run?.instructions ?? research.instructions}</pre>
+        </div>
+        {run?.response && (
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Response</div>
+            <pre className="text-zinc-300 whitespace-pre-wrap break-words font-mono text-[11px]">{run.response}</pre>
+          </div>
+        )}
+        {run?.errorMessage && (
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-red-400 mb-1">Error</div>
+            <pre className="text-red-300 whitespace-pre-wrap break-words font-mono text-[11px]">{run.errorMessage}</pre>
+          </div>
+        )}
+        {actionError && <p className="text-red-400 text-[11px]">{actionError}</p>}
+        <div className="flex flex-wrap items-center gap-2">
+          {isPending && (
+            <button onClick={approve} disabled={!!actionBusy}
+              className="px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white disabled:opacity-50">
+              {actionBusy === 'approve' ? 'Approving…' : 'Approve'}
+            </button>
+          )}
+          {(isPending || status === 'queued') && (
+            <button onClick={cancel} disabled={!!actionBusy}
+              className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 disabled:opacity-50">
+              {actionBusy === 'cancel' ? 'Cancelling…' : 'Cancel'}
+            </button>
+          )}
+          {status === 'failure' && !liveChildExists && (
+            <>
+              <button onClick={() => retryOrContinue('retry')} disabled={!!actionBusy}
+                className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 disabled:opacity-50">
+                {actionBusy === 'retry' ? 'Retrying…' : 'Retry'}
+              </button>
+              <button onClick={() => retryOrContinue('continue')} disabled={!!actionBusy}
+                className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 disabled:opacity-50">
+                {actionBusy === 'continue' ? 'Continuing…' : 'Continue'}
+              </button>
+            </>
+          )}
+          <a href={`/researchers/${research.researcherId}`}
+            className="ml-auto text-zinc-500 hover:text-zinc-300 underline">open researcher</a>
         </div>
       </div>
     </details>

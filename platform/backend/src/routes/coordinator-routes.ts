@@ -237,11 +237,21 @@ const persistAssistantMessage = async (
       pending: true,
     }))
   const oracles = accumulator.oracleResponses
+  const researches = accumulator.researchResults
+    .filter((r) => !r.error && r.researcherId && r.runId)
+    .map((r) => ({
+      researcher: r.researcher,
+      researcherId: r.researcherId!,
+      runId: r.runId!,
+      instructions: r.instructions,
+      pending: true,
+    }))
   const reads = accumulator.readResults.map((r) => ({
     runId: r.runId,
     found: r.found,
     status: r.status,
     developerName: r.developerName,
+    researcherName: (r as any).researcherName ?? null,
     report: r.report,
   }))
   const spawns = accumulator.spawnResults
@@ -260,6 +270,7 @@ const persistAssistantMessage = async (
   let stored = fullText
   if (oracles.length > 0) stored += `\n\n<!--ORACLES:${JSON.stringify(oracles)}:ORACLES-->`
   if (dispatches.length > 0) stored += `\n\n<!--DISPATCHES:${JSON.stringify(dispatches)}:DISPATCHES-->`
+  if (researches.length > 0) stored += `\n\n<!--RESEARCHES:${JSON.stringify(researches)}:RESEARCHES-->`
   if (reads.length > 0) stored += `\n\n<!--READS:${JSON.stringify(reads)}:READS-->`
   if (spawns.length > 0) stored += `\n\n<!--SPAWNS:${JSON.stringify(spawns)}:SPAWNS-->`
 

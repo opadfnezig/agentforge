@@ -6,9 +6,11 @@ import { config } from '../config.js'
 import { logger } from '../utils/logger.js'
 import * as oracleQueries from '../db/queries/oracles.js'
 import * as developerQueries from '../db/queries/developers.js'
+import * as researcherQueries from '../db/queries/researchers.js'
 import * as spawnerQueries from '../db/queries/spawners.js'
 import { queryOracle } from './oracle-engine.js'
 import { developerRegistry } from './developer-registry.js'
+import { researcherRegistry } from './researcher-registry.js'
 import type { RunMode, DeveloperRun } from '../schemas/developer.js'
 import { spawnSpecSchema, PRIMITIVE_KINDS, type PrimitiveKind, type SpawnSpec } from '../schemas/spawner.js'
 import {
@@ -68,11 +70,20 @@ export type CoordinatorEvent =
       pending: boolean
     }
   | {
+      type: 'research'
+      researcher: string
+      researcherId: string
+      runId: string
+      instructions: string
+      pending: boolean
+    }
+  | {
       type: 'read'
       runId: string
       found: boolean
       status: string | null
       developerName: string | null
+      researcherName?: string | null
       report: string
     }
   | {
@@ -108,6 +119,11 @@ interface DeveloperSummary {
   online: boolean
 }
 
+interface ResearcherSummary {
+  name: string
+  online: boolean
+}
+
 interface SpawnerHostSummary {
   hostId: string
   name: string
@@ -126,6 +142,16 @@ const loadDeveloperList = async (): Promise<DeveloperSummary[]> => {
     workspacePath: d.workspacePath,
     online: developerRegistry.isOnline(d.id),
   }))
+}
+
+const loadResearcherList = async (): Promise<ResearcherSummary[]> => {
+  const researchers = await researcherQueries.listResearchers()
+  return researchers
+    .filter((r) => r.status !== 'destroyed')
+    .map((r) => ({
+      name: r.name,
+      online: researcherRegistry.isOnline(r.id),
+    }))
 }
 
 const loadSpawnerHostList = async (): Promise<SpawnerHostSummary[]> => {
@@ -154,6 +180,7 @@ const buildFirstPassPrompt = (
   profile: string,
   oracleList: OracleSummary[],
   developerList: DeveloperSummary[],
+  researcherList: ResearcherSummary[],
   spawnerHostList: SpawnerHostSummary[],
   history: ChatMessage[],
   message: string,
@@ -170,6 +197,12 @@ const buildFirstPassPrompt = (
         .join('\n')
     : '(none configured)'
 
+  const researcherListStr = researcherList.length
+    ? researcherList
+        .map((r) => `- ${r.name} ${r.online ? '[online]' : '[OFFLINE]'}`)
+        .join('\n')
+    : '(none configured)'
+
   const hostListStr = spawnerHostList.length
     ? spawnerHostList
         .map((h) => `- ${h.hostId} (${h.name}) [${h.status}]`)
@@ -179,13 +212,17 @@ const buildFirstPassPrompt = (
   let prompt = `You are a coordinator with LIVE access to:
 1. Oracle knowledge bases — you can query any oracle fresh every turn.
 2. Developer workers — code-executing agents that run Claude Code in a repo on dispatch.
-3. Spawner hosts — physical hosts that can spin up new developer/researcher containers via [spawn, ...].
+3. Researcher workers — websearch + analysis agents that produce structured markdown articles.
+4. Spawner hosts — physical hosts that can spin up new developer/researcher/oracle containers via [spawn, ...].
 
 Available oracles:
 ${oracleListStr}
 
 Available developers:
 ${developerListStr}
+
+Available researchers:
+${researcherListStr}
 
 Available spawner hosts:
 ${hostListStr}
@@ -212,6 +249,15 @@ clear detailed instructions for the developer
 Modes:
 - implement: developer will make changes, commit and push if git repo (use for actual work)
 - clarify: developer reads the code and asks clarifying questions, never commits (use when instructions would be ambiguous)
+
+To dispatch a researcher (web search + analysis, no code edits):
+[research, researcher-name]
+clear research question or topic
+[end]
+
+The researcher writes a structured markdown article (Summary / Findings / Sources) to its results dir and returns a brief summary in the response. Use [research, ...] when the user asks for facts, market data, comparisons, library/api documentation, anything that needs WebSearch/WebFetch. Do NOT use a developer for this — they don't have web tools.
+
+Researchers have no \`mode\` parameter (single mode: research). The result is read back the same way as developer runs via [read, runId].
 
 To spawn a new primitive (developer / researcher / oracle container) on one of the registered hosts:
 [spawn, host-id, primitive-name]
@@ -334,10 +380,19 @@ interface DispatchResult {
   error: string | null
 }
 
+interface ResearchResult {
+  researcher: string
+  researcherId: string | null
+  runId: string | null
+  instructions: string
+  error: string | null
+}
+
 const buildSecondPassPrompt = (
   profile: string,
   oracleResponses: { domain: string; question: string; response: string }[],
   dispatchResults: DispatchResult[],
+  researchResults: ResearchResult[],
   readResults: ReadResult[],
   spawnResults: SpawnResult[],
   history: ChatMessage[],
@@ -345,6 +400,8 @@ const buildSecondPassPrompt = (
 ): string => {
   const dispatched = dispatchResults.filter((d) => !d.error)
   const dispatchFailed = dispatchResults.filter((d) => d.error)
+  const researched = researchResults.filter((r) => !r.error)
+  const researchFailed = researchResults.filter((r) => r.error)
   const spawned = spawnResults.filter((s) => !s.error)
   const reads = readResults
   const oraclesUsed = oracleResponses
@@ -358,17 +415,19 @@ const buildSecondPassPrompt = (
   const truthLines: string[] = []
   truthLines.push(`Oracles consulted: ${oraclesUsed.length}`)
   truthLines.push(`Dispatches emitted: ${dispatched.length}${dispatchFailed.length > 0 ? ` (plus ${dispatchFailed.length} failed)` : ''}`)
+  truthLines.push(`Researches emitted: ${researched.length}${researchFailed.length > 0 ? ` (plus ${researchFailed.length} failed)` : ''}`)
   truthLines.push(`Reads pulled: ${reads.length}`)
   truthLines.push(`Spawns proposed: ${spawned.length}`)
   const truth = truthLines.join('\n')
 
-  let prompt = `You are a coordinator. The user's turn ran across one or more stages of [query]/[read]/[dispatch]/[spawn] commands. The actual results from those stages are below. Synthesize the user-facing reply.
+  let prompt = `You are a coordinator. The user's turn ran across one or more stages of [query]/[read]/[dispatch]/[research]/[spawn] commands. The actual results from those stages are below. Synthesize the user-facing reply.
 
 GROUND TRUTH FOR THIS TURN — narrate ONLY this:
 ${truth}
 
 CRITICAL — do not narrate actions that did not happen:
 - If "Dispatches emitted" is 0, you MUST NOT write "Dispatched X" / "I dispatched X" / "X is pending approval in a badge" anywhere. There is no badge. Saying so produces a fake message and the user loses trust.
+- If "Researches emitted" is 0, you MUST NOT claim you sent a researcher anywhere.
 - If "Spawns proposed" is 0, you MUST NOT claim a spawn happened.
 - If "Reads pulled" is 0, do not claim you read a run report.
 - If you wanted to dispatch but didn't, just say so plainly: "I have the data; want me to dispatch X to do Y?" — let the user trigger the next turn.
@@ -377,12 +436,13 @@ CRITICAL — do not narrate actions that did not happen:
 Style:
 - Answer the user's question directly, using oracle data and run reports as source of truth.
 - For each real dispatch (one that appears in a DISPATCHED block below), tell the user briefly: which developer, mode, and that it's awaiting approval in the chat badge.
-- Do NOT repeat the full dispatch instructions in your user message. The user can expand the dispatch badge to see them (and can edit them before approving).
-- When you dispatched, ALWAYS include a "## Decisions I Made" section listing assumptions/ambiguities you resolved (e.g. "picked implement over clarify because X", "scoped to module Y, skipped Z"). This is the user's chance to catch you before they approve.
+- For each real research (RESEARCH DISPATCHED block), tell the user which researcher and the topic — also awaiting approval via badge.
+- Do NOT repeat full instructions in your user message. The user can expand badges to see them.
+- When you dispatched or researched, ALWAYS include a "## Decisions I Made" section listing assumptions/ambiguities you resolved.
 - If you spawned, same "Decisions I Made" rule applies for image tags, env vars, mount paths.
 - If you pulled a run report, summarize the takeaway — the user can expand the read badge for raw text.
 - Be dense. No filler, no meta-commentary about oracles or your process.
-- You have live oracle/developer/spawner access every turn — never say otherwise.`
+- You have live oracle/developer/researcher/spawner access every turn — never say otherwise.`
 
   if (profile) {
     prompt += `\n\n--- USER PROFILE ---\n${profile}\n--- END PROFILE ---`
@@ -397,6 +457,14 @@ Style:
       prompt += `\n\n--- DISPATCH FAILED: ${d.developer} ---\nError: ${d.error}\nInstructions attempted: ${d.instructions}\n--- END DISPATCH ---`
     } else {
       prompt += `\n\n--- DISPATCHED (pending approval): ${d.developer} (mode: ${d.mode}, runId: ${d.runId}) ---\nInstructions: ${d.instructions}\n--- END DISPATCH ---`
+    }
+  }
+
+  for (const r of researchResults) {
+    if (r.error) {
+      prompt += `\n\n--- RESEARCH FAILED: ${r.researcher} ---\nError: ${r.error}\nInstructions attempted: ${r.instructions}\n--- END RESEARCH ---`
+    } else {
+      prompt += `\n\n--- RESEARCH DISPATCHED (pending approval): ${r.researcher} (runId: ${r.runId}) ---\nInstructions: ${r.instructions}\n--- END RESEARCH ---`
     }
   }
 
@@ -446,6 +514,21 @@ const parseDispatchCommands = (
     })
   }
   return dispatches
+}
+
+const parseResearchCommands = (
+  output: string
+): { researcher: string; instructions: string }[] => {
+  const researches: { researcher: string; instructions: string }[] = []
+  const regex = /\[research,\s*([^\]]+)\]\s*\n([\s\S]*?)\n\[end\]/gi
+  let match
+  while ((match = regex.exec(output)) !== null) {
+    researches.push({
+      researcher: match[1].trim(),
+      instructions: match[2].trim(),
+    })
+  }
+  return researches
 }
 
 // Pull-on-demand: [read, run-id] [end]. Body is intentionally empty (the
@@ -549,6 +632,7 @@ interface ReadResult {
   found: boolean
   status: string | null
   developerName: string | null
+  researcherName?: string | null
   report: string
 }
 
@@ -620,6 +704,60 @@ const formatRunReport = (run: DeveloperRun, developerName: string | null): strin
   return lines.join('\n')
 }
 
+const formatResearchRunReport = (
+  run: import('../schemas/researcher.js').ResearcherRun,
+  researcherName: string | null,
+): string => {
+  const lines: string[] = []
+  lines.push(`runId: ${run.id}`)
+  lines.push(`researcher: ${researcherName ?? run.researcherId}`)
+  lines.push(`status: ${run.status}`)
+
+  const created = formatTimestamp(run.createdAt)
+  const started = formatTimestamp(run.startedAt)
+  const finished = formatTimestamp(run.finishedAt)
+  if (created) lines.push(`created: ${created}`)
+  if (started) lines.push(`started: ${started}`)
+  if (finished) lines.push(`finished: ${finished}`)
+  if (started && !finished) {
+    const elapsedMs = Date.now() - new Date(started).getTime()
+    if (Number.isFinite(elapsedMs) && elapsedMs >= 0) {
+      lines.push(`elapsed_ms: ${elapsedMs}`)
+    }
+  }
+
+  if (run.model) lines.push(`model: ${run.model}`)
+  if (typeof run.totalCostUsd === 'number') lines.push(`total_cost_usd: ${run.totalCostUsd}`)
+  if (typeof run.durationMs === 'number') lines.push(`duration_ms: ${run.durationMs}`)
+  if (run.stopReason) lines.push(`stop_reason: ${run.stopReason}`)
+
+  if (run.response) {
+    lines.push('')
+    lines.push('--- Final report ---')
+    lines.push(run.response)
+  } else if (run.status === 'pending') {
+    lines.push('')
+    lines.push('(Awaiting user approval in the chat badge — no research has started.)')
+  } else if (run.status === 'queued') {
+    lines.push('')
+    lines.push('(Approved and queued — waiting for the researcher to be idle.)')
+  } else if (run.status === 'running') {
+    lines.push('')
+    lines.push('(Still researching — no final report yet. Re-read later for the result.)')
+  } else if (run.status === 'cancelled') {
+    lines.push('')
+    lines.push('(Cancelled before completion — no report.)')
+  }
+
+  if (run.errorMessage) {
+    lines.push('')
+    lines.push('--- Error ---')
+    lines.push(run.errorMessage)
+  }
+
+  return lines.join('\n')
+}
+
 // First pass: routing decision. Non-streaming — we want the full output before
 // parsing for [query]/[dispatch]/[read] commands.
 const runFirstPassDirect = async (prompt: string): Promise<{ text: string; trailer: MessageTrailer }> => {
@@ -655,6 +793,7 @@ const runSecondPassDirect = async (
 export interface StageAccumulator {
   oracleResponses: { domain: string; question: string; response: string }[]
   dispatchResults: DispatchResult[]
+  researchResults: ResearchResult[]
   readResults: ReadResult[]
   spawnResults: SpawnResult[]
 }
@@ -662,6 +801,7 @@ export interface StageAccumulator {
 const newAccumulator = (): StageAccumulator => ({
   oracleResponses: [],
   dispatchResults: [],
+  researchResults: [],
   readResults: [],
   spawnResults: [],
 })
@@ -669,6 +809,7 @@ const newAccumulator = (): StageAccumulator => ({
 const accumulatorEmpty = (a: StageAccumulator): boolean =>
   a.oracleResponses.length === 0 &&
   a.dispatchResults.length === 0 &&
+  a.researchResults.length === 0 &&
   a.readResults.length === 0 &&
   a.spawnResults.length === 0
 
@@ -684,6 +825,13 @@ const formatStageResults = (a: StageAccumulator): string => {
       out.push(`\n\n--- DISPATCH FAILED: ${d.developer} ---\nError: ${d.error}\nInstructions attempted: ${d.instructions}\n--- END DISPATCH ---`)
     } else {
       out.push(`\n\n--- DISPATCHED (pending approval): ${d.developer} (mode: ${d.mode}, runId: ${d.runId}) ---\nInstructions: ${d.instructions}\n--- END DISPATCH ---`)
+    }
+  }
+  for (const r of a.researchResults) {
+    if (r.error) {
+      out.push(`\n\n--- RESEARCH FAILED: ${r.researcher} ---\nError: ${r.error}\nInstructions attempted: ${r.instructions}\n--- END RESEARCH ---`)
+    } else {
+      out.push(`\n\n--- RESEARCH DISPATCHED (pending approval): ${r.researcher} (runId: ${r.runId}) ---\nInstructions: ${r.instructions}\n--- END RESEARCH ---`)
     }
   }
   for (const r of a.readResults) {
@@ -709,6 +857,7 @@ interface RuntimeState {
   profile: string
   oracleList: OracleSummary[]
   developerList: DeveloperSummary[]
+  researcherList: ResearcherSummary[]
   spawnerHostList: SpawnerHostSummary[]
 }
 
@@ -758,6 +907,7 @@ const executeStage = async (
   cmds: {
     queries: { domain: string; question: string }[]
     dispatches: { developer: string; mode: RunMode; instructions: string }[]
+    researches: { researcher: string; instructions: string }[]
     reads: { runId: string }[]
     spawns: ParsedSpawnCommand[]
   },
@@ -765,20 +915,24 @@ const executeStage = async (
 ): Promise<{
   oracleResponses: { domain: string; question: string; response: string }[]
   dispatchResults: DispatchResult[]
+  researchResults: ResearchResult[]
   readResults: ReadResult[]
   spawnResults: SpawnResult[]
 }> => {
-  const [allOracles, allDevelopers, allHosts] = await Promise.all([
+  const [allOracles, allDevelopers, allResearchers, allHosts] = await Promise.all([
     oracleQueries.listOracles(),
     developerQueries.listDevelopers(),
+    researcherQueries.listResearchers(),
     spawnerQueries.listSpawnerHosts(),
   ])
   const oraclesByDomain = new Map(allOracles.map((o) => [o.domain, o]))
   const developersByName = new Map(allDevelopers.map((d) => [d.name, d]))
   const developersById = new Map(allDevelopers.map((d) => [d.id, d]))
+  const researchersByName = new Map(allResearchers.map((r) => [r.name, r]))
+  const researchersById = new Map(allResearchers.map((r) => [r.id, r]))
   const hostsByHostId = new Map(allHosts.map((h) => [h.hostId, h]))
 
-  const [oracleResponses, dispatchResults, readResults, spawnResults] = await Promise.all([
+  const [oracleResponses, dispatchResults, researchResults, readResults, spawnResults] = await Promise.all([
     Promise.all(
       cmds.queries.map(async (q) => {
         const oracle = oraclesByDomain.get(q.domain)
@@ -840,6 +994,41 @@ const executeStage = async (
       })
     ),
     Promise.all(
+      cmds.researches.map(async (r): Promise<ResearchResult> => {
+        const researcher = researchersByName.get(r.researcher)
+        if (!researcher) {
+          const result: ResearchResult = {
+            researcher: r.researcher,
+            researcherId: null,
+            runId: null,
+            instructions: r.instructions,
+            error: `Researcher "${r.researcher}" not found`,
+          }
+          logger.warn({ researcher: r.researcher }, 'Research failed: researcher not found')
+          return result
+        }
+        try {
+          // Mirror dispatch flow: create the run in 'pending' so the user
+          // approves via the badge before the researcher actually starts.
+          const run = await researcherQueries.createRun(researcher.id, r.instructions, 'pending')
+          logger.info({ runId: run.id, researcher: r.researcher }, 'Research pending approval')
+          emit({
+            type: 'research',
+            researcher: r.researcher,
+            researcherId: researcher.id,
+            runId: run.id,
+            instructions: r.instructions,
+            pending: true,
+          })
+          return { researcher: r.researcher, researcherId: researcher.id, runId: run.id, instructions: r.instructions, error: null }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          logger.error({ researcher: r.researcher, error: msg }, 'Research failed: createRun threw')
+          return { researcher: r.researcher, researcherId: researcher.id, runId: null, instructions: r.instructions, error: msg }
+        }
+      })
+    ),
+    Promise.all(
       cmds.reads.map(async (r): Promise<ReadResult> => {
         const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(r.runId)
         if (!isUuid) {
@@ -855,25 +1044,41 @@ const executeStage = async (
         }
         try {
           const run = await developerQueries.getRun(r.runId)
-          if (!run) {
+          if (run) {
+            const dev = developersById.get(run.developerId)
+            const developerName = dev?.name ?? null
             const result: ReadResult = {
-              runId: r.runId,
-              found: false,
-              status: null,
-              developerName: null,
-              report: `Run "${r.runId}" not found.`,
+              runId: run.id,
+              found: true,
+              status: run.status,
+              developerName,
+              report: formatRunReport(run, developerName),
             }
             emit({ type: 'read', ...result })
             return result
           }
-          const dev = developersById.get(run.developerId)
-          const developerName = dev?.name ?? null
+          // Not a developer run — try researchers.
+          const researchRun = await researcherQueries.getRun(r.runId)
+          if (researchRun) {
+            const researcher = researchersById.get(researchRun.researcherId)
+            const researcherName = researcher?.name ?? null
+            const result: ReadResult = {
+              runId: researchRun.id,
+              found: true,
+              status: researchRun.status,
+              developerName: null,
+              researcherName,
+              report: formatResearchRunReport(researchRun, researcherName),
+            }
+            emit({ type: 'read', ...result })
+            return result
+          }
           const result: ReadResult = {
-            runId: run.id,
-            found: true,
-            status: run.status,
-            developerName,
-            report: formatRunReport(run, developerName),
+            runId: r.runId,
+            found: false,
+            status: null,
+            developerName: null,
+            report: `Run "${r.runId}" not found.`,
           }
           emit({ type: 'read', ...result })
           return result
@@ -964,7 +1169,7 @@ const executeStage = async (
     ),
   ])
 
-  return { oracleResponses, dispatchResults, readResults, spawnResults }
+  return { oracleResponses, dispatchResults, researchResults, readResults, spawnResults }
 }
 
 // Single hot-path used by both `run()` (fresh turn) and `resumeRun()` (after
@@ -991,6 +1196,7 @@ const runMultiStage = async (
       state.profile,
       state.oracleList,
       state.developerList,
+      state.researcherList,
       state.spawnerHostList,
       state.history,
       state.message,
@@ -1002,15 +1208,17 @@ const runMultiStage = async (
 
     const queries = parseQueryCommands(text)
     const dispatches = parseDispatchCommands(text)
+    const researches = parseResearchCommands(text)
     const reads = parseReadCommands(text)
     const spawns = parseSpawnCommands(text)
-    const totalCommands = queries.length + dispatches.length + reads.length + spawns.length
+    const totalCommands = queries.length + dispatches.length + researches.length + reads.length + spawns.length
 
     logger.info({
       stage,
       stagesUsedThisWindow,
       queriesFound: queries.length,
       dispatchesFound: dispatches.length,
+      researchesFound: researches.length,
       readsFound: reads.length,
       spawnsFound: spawns.length,
       outputPreview: text.slice(0, 800),
@@ -1041,6 +1249,9 @@ const runMultiStage = async (
     if (queries.length > 0) {
       emit({ type: 'status', message: `Querying ${queries.length} oracle(s): ${queries.map((q) => q.domain).join(', ')}` })
     }
+    if (researches.length > 0) {
+      emit({ type: 'status', message: `Dispatching ${researches.length} research(es): ${researches.map((r) => r.researcher).join(', ')}` })
+    }
     if (reads.length > 0) {
       emit({ type: 'status', message: `Reading ${reads.length} run report(s)` })
     }
@@ -1048,9 +1259,10 @@ const runMultiStage = async (
       emit({ type: 'status', message: `Proposing ${spawns.length} spawn(s)` })
     }
 
-    const stageResults = await executeStage({ queries, dispatches, reads, spawns }, emit)
+    const stageResults = await executeStage({ queries, dispatches, researches, reads, spawns }, emit)
     accumulator.oracleResponses.push(...stageResults.oracleResponses)
     accumulator.dispatchResults.push(...stageResults.dispatchResults)
+    accumulator.researchResults.push(...stageResults.researchResults)
     accumulator.readResults.push(...stageResults.readResults)
     accumulator.spawnResults.push(...stageResults.spawnResults)
 
@@ -1072,6 +1284,7 @@ const runMultiStage = async (
       const hintParts: string[] = []
       if (stageResults.oracleResponses.length) hintParts.push(`${stageResults.oracleResponses.length} oracle(s)`)
       if (stageResults.dispatchResults.length) hintParts.push(`${stageResults.dispatchResults.length} dispatch(es)`)
+      if (stageResults.researchResults.length) hintParts.push(`${stageResults.researchResults.length} research(es)`)
       if (stageResults.readResults.length) hintParts.push(`${stageResults.readResults.length} read(s)`)
       if (stageResults.spawnResults.length) hintParts.push(`${stageResults.spawnResults.length} spawn(s)`)
       const pendingHint = hintParts.length
@@ -1108,6 +1321,7 @@ const runMultiStage = async (
     state.profile,
     accumulator.oracleResponses,
     accumulator.dispatchResults,
+    accumulator.researchResults,
     accumulator.readResults,
     accumulator.spawnResults,
     state.history,
@@ -1133,13 +1347,14 @@ const runMultiStage = async (
 }
 
 const buildRuntimeState = async (message: string, history: ChatMessage[]): Promise<RuntimeState> => {
-  const [profile, oracleList, developerList, spawnerHostList] = await Promise.all([
+  const [profile, oracleList, developerList, researcherList, spawnerHostList] = await Promise.all([
     loadUserProfile(),
     loadOracleList(),
     loadDeveloperList(),
+    loadResearcherList(),
     loadSpawnerHostList(),
   ])
-  return { message, history, profile, oracleList, developerList, spawnerHostList }
+  return { message, history, profile, oracleList, developerList, researcherList, spawnerHostList }
 }
 
 export const run = async (
@@ -1148,7 +1363,7 @@ export const run = async (
   emit: (event: CoordinatorEvent) => void,
 ): Promise<{ text: string; trailer: TurnTrailer; paused: boolean; accumulator: StageAccumulator }> => {
   const state = await buildRuntimeState(message, history)
-  emit({ type: 'status', message: `Deciding (${state.oracleList.length} oracles, ${state.developerList.length} devs, ${state.spawnerHostList.length} hosts available)...` })
+  emit({ type: 'status', message: `Deciding (${state.oracleList.length} oracles, ${state.developerList.length} devs, ${state.researcherList.length} researchers, ${state.spawnerHostList.length} hosts available)...` })
   return runMultiStage(state, emit, null)
 }
 
