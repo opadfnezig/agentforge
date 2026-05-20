@@ -190,6 +190,34 @@ researchersRouter.post('/:id/dispatch', async (req, res, next) => {
   }
 })
 
+researchersRouter.post('/:id/reset-state', async (req, res, next) => {
+  try {
+    const researcher = await researcherQueries.getResearcher(req.params.id)
+    if (!researcher) {
+      throw new AppError(404, 'Researcher not found', 'RESEARCHER_NOT_FOUND')
+    }
+    if (!researcherRegistry.isOnline(researcher.id)) {
+      throw new AppError(
+        409,
+        'Researcher is offline. Wipe <spawner-dir>/<name>/memories/ on the host instead.',
+        'RESEARCHER_OFFLINE'
+      )
+    }
+    if (researcher.status !== 'idle') {
+      throw new AppError(
+        409,
+        `Researcher is ${researcher.status}; cannot reset state mid-run`,
+        'RESEARCHER_BUSY'
+      )
+    }
+    researcherRegistry.resetState(researcher.id)
+    logger.info({ researcherId: researcher.id }, 'Researcher reset-state requested')
+    res.status(202).json({ ok: true })
+  } catch (error) {
+    next(error)
+  }
+})
+
 researchersRouter.get('/:id/queue', async (req, res, next) => {
   try {
     const researcher = await researcherQueries.getResearcher(req.params.id)

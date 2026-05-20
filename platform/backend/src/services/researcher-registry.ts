@@ -90,6 +90,15 @@ class ResearcherRegistry {
     return ws.readyState === 1
   }
 
+  resetState(researcherId: string): void {
+    const ws = this.sockets.get(researcherId)
+    if (!ws || ws.readyState !== 1) {
+      throw new Error(`Researcher ${researcherId} is not online`)
+    }
+    ws.send(JSON.stringify({ type: 'reset_state' }))
+    logger.info({ researcherId }, 'reset_state sent to researcher')
+  }
+
   async dispatch(
     researcherId: string,
     runId: string,

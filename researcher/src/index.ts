@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 import { spawn, ChildProcess } from 'child_process';
-import { mkdirSync } from 'fs';
+import { mkdirSync, existsSync, readdirSync, rmSync } from 'fs';
+import { join } from 'path';
 import * as readline from 'readline';
 import 'dotenv/config';
 
@@ -100,7 +101,16 @@ type DispatchMessage = {
   resumeContext?: string | null;
 };
 
-type IncomingMessage = DispatchMessage | { type: string; [k: string]: unknown };
+type ResetStateMessage = { type: 'reset_state' };
+
+type IncomingMessage = DispatchMessage | ResetStateMessage | { type: string; [k: string]: unknown };
+
+// Auto-memory + session JSONLs live under the project dir derived from
+// WORKSPACE_PATH=/workspace, i.e. ~/.claude/projects/-workspace. Memory is
+// volume-mounted from the host; session JSONLs are ephemeral but get
+// wiped here too so a reset means "no leftover conversation state".
+const PROJECT_DIR = '/home/agent/.claude/projects/-workspace';
+const MEMORY_DIR = `${PROJECT_DIR}/memory`;
 
 class ResearcherClient {
   private ws: WebSocket | null = null;
@@ -206,7 +216,39 @@ class ResearcherClient {
       await this.handleDispatch(msg as DispatchMessage);
       return;
     }
+    if (msg.type === 'reset_state') {
+      this.handleResetState();
+      return;
+    }
     log(`Unhandled message type=${msg.type}`);
+  }
+
+  private handleResetState(): void {
+    if (this.currentRun) {
+      logErr(`Refusing reset_state while run ${this.currentRun.runId} is in progress`);
+      return;
+    }
+    let memoryEntries = 0;
+    let jsonlsRemoved = 0;
+    try {
+      if (existsSync(MEMORY_DIR)) {
+        for (const entry of readdirSync(MEMORY_DIR)) {
+          rmSync(join(MEMORY_DIR, entry), { recursive: true, force: true });
+          memoryEntries++;
+        }
+      }
+      if (existsSync(PROJECT_DIR)) {
+        for (const entry of readdirSync(PROJECT_DIR)) {
+          if (entry.endsWith('.jsonl')) {
+            rmSync(join(PROJECT_DIR, entry), { force: true });
+            jsonlsRemoved++;
+          }
+        }
+      }
+      log(`reset_state: wiped ${memoryEntries} memory entries, ${jsonlsRemoved} session jsonls`);
+    } catch (err) {
+      logErr('reset_state failed', err);
+    }
   }
 
   private async handleDispatch(msg: DispatchMessage): Promise<void> {
