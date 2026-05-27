@@ -39,14 +39,14 @@ function loadConfig(): Config {
   if (!oracleId) throw new Error('ORACLE_ID is required');
   if (!oracleSecret) throw new Error('ORACLE_SECRET is required');
 
-  const planeBaseUrl = process.env.PLANE_BASE_URL;
+  const planeBaseUrl = process.env.PLANE_API_URL;
   const planeApiKey = process.env.PLANE_API_KEY;
   const plane: PlaneConfig | null =
     planeBaseUrl && planeApiKey
       ? {
           baseUrl: planeBaseUrl,
           apiKey: planeApiKey,
-          workspaceSlug: process.env.PLANE_WORKSPACE_SLUG || undefined,
+          workspaceSlug: process.env.PLANE_WORKSPACE || undefined,
           projectId: process.env.PLANE_PROJECT_ID || undefined,
         }
       : null;
@@ -64,10 +64,10 @@ const PLANE_MCP_ENTRY = '/app/dist/plane-mcp.js';
 
 function writeMcpConfig(cfg: PlaneConfig): string {
   const env: Record<string, string> = {
-    PLANE_BASE_URL: cfg.baseUrl,
+    PLANE_API_URL: cfg.baseUrl,
     PLANE_API_KEY: cfg.apiKey,
   };
-  if (cfg.workspaceSlug) env.PLANE_WORKSPACE_SLUG = cfg.workspaceSlug;
+  if (cfg.workspaceSlug) env.PLANE_WORKSPACE = cfg.workspaceSlug;
   if (cfg.projectId) env.PLANE_PROJECT_ID = cfg.projectId;
   const mcp = {
     mcpServers: {
@@ -152,7 +152,7 @@ You have MCP tools to read and modify a Plane.so instance. Tool names start with
 - \`plane_get_cycle\` — one cycle by id.
 - \`plane_list_cycle_work_items\` — tasks inside a specific cycle.
 
-Defaults: workspace_slug and project_id may be omitted on each call if PLANE_WORKSPACE_SLUG / PLANE_PROJECT_ID env defaults are set (they often are — try without first, supply explicitly only if you need a different scope). \`state\`, \`assignees\`, \`labels\` take UUIDs from the Plane instance — surface them as-is when listing, accept them as-is when updating.
+Defaults: workspace_slug and project_id may be omitted on each call if PLANE_WORKSPACE / PLANE_PROJECT_ID env defaults are set (they often are — try without first, supply explicitly only if you need a different scope). \`state\`, \`assignees\`, \`labels\` take UUIDs from the Plane instance — surface them as-is when listing, accept them as-is when updating.
 
 These tools talk to a real, shared system. Treat any mutation as visible to other people immediately.`;
 

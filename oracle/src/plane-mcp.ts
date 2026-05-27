@@ -1,6 +1,6 @@
 // MCP server exposing a small Plane.so toolset over stdio. Spawned by the
-// claude CLI when the oracle is configured with PLANE_BASE_URL +
-// PLANE_API_KEY (and optional PLANE_WORKSPACE_SLUG / PLANE_PROJECT_ID
+// claude CLI when the oracle is configured with PLANE_API_URL +
+// PLANE_API_KEY (and optional PLANE_WORKSPACE / PLANE_PROJECT_ID
 // defaults). The oracle generates an MCP config file pointing here.
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -8,13 +8,13 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { PlaneClient, PlaneError } from './plane-client.js';
 
-const baseUrl = process.env.PLANE_BASE_URL;
+const baseUrl = process.env.PLANE_API_URL;
 const apiKey = process.env.PLANE_API_KEY;
-const defaultWs = process.env.PLANE_WORKSPACE_SLUG;
+const defaultWs = process.env.PLANE_WORKSPACE;
 const defaultProject = process.env.PLANE_PROJECT_ID;
 
 if (!baseUrl) {
-  process.stderr.write('plane-mcp: PLANE_BASE_URL is required\n');
+  process.stderr.write('plane-mcp: PLANE_API_URL is required\n');
   process.exit(2);
 }
 if (!apiKey) {
@@ -27,7 +27,7 @@ const server = new McpServer({ name: 'plane', version: '0.1.0' });
 
 const resolveWs = (input?: string): string => {
   const v = input ?? defaultWs;
-  if (!v) throw new Error('workspace_slug required (no PLANE_WORKSPACE_SLUG default)');
+  if (!v) throw new Error('workspace_slug required (no PLANE_WORKSPACE default)');
   return v;
 };
 const resolveProject = (input?: string): string => {
@@ -73,7 +73,7 @@ const tool = (name: string, description: string, shape: ToolShape, handler: Tool
   ) => void)(name, description, shape, handler);
 };
 
-const workspaceSlug = z.string().optional().describe('Workspace slug. Defaults to PLANE_WORKSPACE_SLUG env if set.');
+const workspaceSlug = z.string().optional().describe('Workspace slug. Defaults to PLANE_WORKSPACE env if set.');
 const projectId = z.string().optional().describe('Project UUID. Defaults to PLANE_PROJECT_ID env if set.');
 
 // Fields valid on both create and update payloads. `name` is intentionally
