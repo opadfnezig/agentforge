@@ -10,7 +10,9 @@
   },
   "dependencies": {
     "ws": "^8.18.0",
-    "dotenv": "^16.4.0"
+    "dotenv": "^16.4.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

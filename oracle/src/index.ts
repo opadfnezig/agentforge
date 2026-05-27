@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { spawn, ChildProcess } from 'child_process';
+import { writeFileSync } from 'fs';
 import * as readline from 'readline';
 import 'dotenv/config';
 
@@ -14,6 +15,14 @@ interface Config {
   workspacePath: string;
   maxTurns: number;
   model: string | undefined;
+  plane: PlaneConfig | null;
+}
+
+interface PlaneConfig {
+  baseUrl: string;
+  apiKey: string;
+  workspaceSlug: string | undefined;
+  projectId: string | undefined;
 }
 
 function loadConfig(): Config {
@@ -30,7 +39,47 @@ function loadConfig(): Config {
   if (!oracleId) throw new Error('ORACLE_ID is required');
   if (!oracleSecret) throw new Error('ORACLE_SECRET is required');
 
-  return { coordinatorUrl, oracleId, oracleSecret, workspacePath, maxTurns, model };
+  const planeBaseUrl = process.env.PLANE_BASE_URL;
+  const planeApiKey = process.env.PLANE_API_KEY;
+  const plane: PlaneConfig | null =
+    planeBaseUrl && planeApiKey
+      ? {
+          baseUrl: planeBaseUrl,
+          apiKey: planeApiKey,
+          workspaceSlug: process.env.PLANE_WORKSPACE_SLUG || undefined,
+          projectId: process.env.PLANE_PROJECT_ID || undefined,
+        }
+      : null;
+
+  return { coordinatorUrl, oracleId, oracleSecret, workspacePath, maxTurns, model, plane };
+}
+
+// Write an MCP config file pointing at the bundled plane-mcp server. Env
+// vars are inlined into the config (rather than relying on inheritance
+// from claude's parent env) so spawning behaviour is deterministic across
+// claude versions. Returns the config path, or null if Plane is not
+// configured.
+const MCP_CONFIG_PATH = '/tmp/oracle-mcp.json';
+const PLANE_MCP_ENTRY = '/app/dist/plane-mcp.js';
+
+function writeMcpConfig(cfg: PlaneConfig): string {
+  const env: Record<string, string> = {
+    PLANE_BASE_URL: cfg.baseUrl,
+    PLANE_API_KEY: cfg.apiKey,
+  };
+  if (cfg.workspaceSlug) env.PLANE_WORKSPACE_SLUG = cfg.workspaceSlug;
+  if (cfg.projectId) env.PLANE_PROJECT_ID = cfg.projectId;
+  const mcp = {
+    mcpServers: {
+      plane: {
+        command: 'node',
+        args: [PLANE_MCP_ENTRY],
+        env,
+      },
+    },
+  };
+  writeFileSync(MCP_CONFIG_PATH, JSON.stringify(mcp, null, 2));
+  return MCP_CONFIG_PATH;
 }
 
 // ---------------------------------------------------------------------------
@@ -61,7 +110,7 @@ function logErr(msg: string, extra?: unknown) {
 
 type Mode = 'read' | 'write' | 'migrate' | 'chat';
 
-const SYSTEM_PROMPT = `You are a knowledge oracle. Your memories live as markdown files at this absolute path:
+const BASE_SYSTEM_PROMPT = `You are a knowledge oracle. Your memories live as markdown files at this absolute path:
 
   /home/agent/.claude/projects/-workspace/memory/
 
@@ -87,6 +136,29 @@ Rules:
 - When information conflicts with existing content, keep both with context on which is newer.
 
 Do not write to /data except to delete files during migrate mode.`;
+
+const PLANE_SYSTEM_PROMPT_SECTION = `
+
+## Plane (project management) tools
+
+You have MCP tools to read and modify a Plane.so instance. Tool names start with \`plane_\`:
+
+- \`plane_list_work_items\` — list tasks in a project (cursor-paginated).
+- \`plane_get_work_item\` — fetch one task by id.
+- \`plane_create_work_item\` — create a task (required: name; optional: priority, state UUID, assignees[], labels[], dates, description_html).
+- \`plane_update_work_item\` — PATCH a task; only include fields you want to change.
+- \`plane_delete_work_item\` — destructive; confirm with the user first unless they explicitly asked.
+- \`plane_list_cycles\` — sprints. \`cycle_view\` filters to \`current | upcoming | completed | draft\` (use \`completed\` to read past sprints).
+- \`plane_get_cycle\` — one cycle by id.
+- \`plane_list_cycle_work_items\` — tasks inside a specific cycle.
+
+Defaults: workspace_slug and project_id may be omitted on each call if PLANE_WORKSPACE_SLUG / PLANE_PROJECT_ID env defaults are set (they often are — try without first, supply explicitly only if you need a different scope). \`state\`, \`assignees\`, \`labels\` take UUIDs from the Plane instance — surface them as-is when listing, accept them as-is when updating.
+
+These tools talk to a real, shared system. Treat any mutation as visible to other people immediately.`;
+
+function buildSystemPrompt(planeConfigured: boolean): string {
+  return planeConfigured ? BASE_SYSTEM_PROMPT + PLANE_SYSTEM_PROMPT_SECTION : BASE_SYSTEM_PROMPT;
+}
 
 function buildReadPrompt(message: string): string {
   return `Answer ONLY from your memories at /home/agent/.claude/projects/-workspace/memory/.
@@ -184,8 +256,16 @@ class OracleClient {
   private reconnectAttempt = 0;
   private shuttingDown = false;
   private currentRun: { runId: string; child: ChildProcess | null } | null = null;
+  private mcpConfigPath: string | null;
+  private systemPrompt: string;
 
-  constructor(private config: Config) {}
+  constructor(private config: Config) {
+    this.mcpConfigPath = config.plane ? writeMcpConfig(config.plane) : null;
+    this.systemPrompt = buildSystemPrompt(config.plane !== null);
+    if (this.mcpConfigPath) {
+      log(`Plane MCP enabled (baseUrl=${config.plane!.baseUrl}, mcp-config=${this.mcpConfigPath})`);
+    }
+  }
 
   start(): void {
     this.connect();
@@ -345,7 +425,8 @@ class OracleClient {
         '--verbose',
         '--output-format', 'stream-json',
         '--max-turns', String(this.config.maxTurns),
-        '--system-prompt', SYSTEM_PROMPT,
+        '--system-prompt', this.systemPrompt,
+        ...(this.mcpConfigPath ? ['--mcp-config', this.mcpConfigPath] : []),
         ...(resumeSessionId ? ['--resume', resumeSessionId] : []),
         ...(this.config.model ? ['--model', this.config.model] : []),
       ];

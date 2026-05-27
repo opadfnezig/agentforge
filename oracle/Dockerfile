@@ -8,7 +8,10 @@ COPY tsconfig.json ./
 RUN npm install
 
 COPY src ./src
-RUN npx tsc
+# zod + @modelcontextprotocol/sdk type inference is heavy enough that tsc
+# OOMs at the default ~1.7 GB heap. 4 GB is comfortable; bump again only
+# if tools are added and emit starts failing.
+RUN NODE_OPTIONS=--max-old-space-size=4096 npx tsc
 
 COPY entrypoint.sh /usr/local/bin/oracle-entrypoint.sh
 RUN chmod +x /usr/local/bin/oracle-entrypoint.sh
